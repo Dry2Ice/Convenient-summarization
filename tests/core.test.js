@@ -19,6 +19,7 @@ import {
     repairedText,
     stripReasoning,
     extractCompletionText,
+    extractStreamText,
     completionErrorText,
     reasoningText,
     describeEmptyAnswer,
@@ -1333,6 +1334,76 @@ test('an empty answer says which of the causes it was', () => {
     assert.match(describeEmptyAnswer({ parsed: false, contentType: 'text/html' }), /text\/html instead of JSON/);
     assert.match(describeEmptyAnswer({ finishReason: 'stop' }), /finish_reason: stop/);
     assert.match(describeEmptyAnswer({}), /empty answer/);
+});
+
+test('a streamed answer is assembled from whatever frames the provider sends', () => {
+    // Streaming is what keeps a long generation alive behind a proxy, and ST
+    // pipes the provider's own events through untouched, so the frames are in
+    // whatever shape that provider uses.
+    const openai = [
+        'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+        '',
+        'data: {"choices":[{"delta":{"content":"Hello"}}]}',
+        '',
+        'data: {"choices":[{"delta":{"content":", world"}}]}',
+        '',
+        'data: [DONE]',
+        '',
+    ].join('\n');
+    const a = extractStreamText(openai);
+    assert.equal(a.text, 'Hello, world');
+    assert.equal(a.frames, 3);
+    assert.equal(a.streamed, true);
+    assert.equal(a.error, '');
+
+    const claude = [
+        'event: message_start\ndata: {"type":"message_start"}',
+        '',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}',
+        '',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+        '',
+    ].join('\n');
+    assert.equal(extractStreamText(claude).text, 'Hi');
+
+    const gemini = [
+        'data: {"candidates":[{"content":{"parts":[{"text":"one "}]}}]}',
+        '',
+        'data: {"candidates":[{"content":{"parts":[{"text":"two"}]}}]}',
+        '',
+    ].join('\n');
+    assert.equal(extractStreamText(gemini).text, 'one two');
+
+    const cohere = 'data: {"event":"content-delta","text":"chunk"}\n';
+    assert.equal(extractStreamText(cohere).text, 'chunk');
+});
+
+test('a provider that ignores streaming still answers', () => {
+    // The body comes back as one object, so it is read as one object.
+    const whole = extractStreamText(JSON.stringify({ choices: [{ message: { content: 'whole body' } }] }));
+    assert.equal(whole.text, 'whole body');
+    assert.equal(whole.streamed, false);
+    assert.equal(extractStreamText('not json at all').text, '');
+    assert.equal(extractStreamText('').text, '');
+});
+
+test('an error inside a stream frame is not lost', () => {
+    const body = 'data: {"error":{"message":"context length exceeded"}}\n\n';
+    const r = extractStreamText(body);
+    assert.equal(r.text, '');
+    assert.match(r.error, /context length exceeded/);
+});
+
+test('reasoning streamed in its own frames is recognised as reasoning', () => {
+    const body = [
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}',
+        '',
+        'data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}',
+        '',
+    ].join('\n');
+    const r = extractStreamText(body);
+    assert.equal(r.text, '');
+    assert.match(r.reasoning, /thinking hard/);
 });
 
 test('countExchanges counts user turns and never returns zero', () => {

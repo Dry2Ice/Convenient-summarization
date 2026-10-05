@@ -6,6 +6,7 @@ import {
     HIDDEN_FLAG,
     PLACEHOLDER,
     extractCompletionText,
+    extractStreamText,
     completionErrorText,
     reasoningText,
     describeEmptyAnswer,
@@ -104,6 +105,7 @@ const DEFAULT_SETTINGS = {
     requestTokenLimit: 8192,
     requestTimeoutSeconds: 300,
     requestPath: 'direct',
+    streamRequests: true,
 
     // Per-chat state lives here, keyed by chatId. Never shared between chats.
     chats: {},
@@ -1157,6 +1159,39 @@ async function fetchWithTimeout(url, init, label) {
 }
 
 /**
+ * Read a response body, reporting the characters as they arrive.
+ *
+ * Streaming is what keeps a long archival generation alive behind a proxy: a
+ * non-streamed request produces no bytes until it is finished, and anything in
+ * the path with a response timeout — nginx, Cloudflare, a reverse proxy — cuts it
+ * off long before the model is done. It also turns "is it working?" from a guess
+ * into a number that moves.
+ */
+async function readBodyWithProgress(response, label) {
+    if (!response.body?.getReader) return response.text();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const chunks = [];
+    let received = 0;
+
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            received += value.length;
+            chunks.push(decoder.decode(value, { stream: true }));
+            reportProgress(received);
+        }
+    } finally {
+        try { reader.releaseLock(); } catch { /* already released */ }
+    }
+
+    return chunks.join('') + decoder.decode();
+}
+
+/**
  * Send our prompt straight to the backend through SillyTavern's own route.
  *
  * generateQuietPrompt rebuilds the entire prompt — character card, world info,
@@ -1168,6 +1203,7 @@ async function directCompletion(prompt, label) {
     const ctx = getContext();
     const oai = ctx.chatCompletionSettings || {};
     const limit = responseLengthFor(0) || 8192;
+    const streamed = getSettings().streamRequests !== false;
 
     const timeoutMs = requestTimeoutMs();
     const body = {
@@ -1178,7 +1214,7 @@ async function directCompletion(prompt, label) {
         presence_penalty: 0,
         top_p: 1,
         max_tokens: limit,
-        stream: false,
+        stream: streamed,
         chat_completion_source: oai.chat_completion_source,
         custom_prompt_post_processing: 'none',
     };
@@ -1193,6 +1229,7 @@ async function directCompletion(prompt, label) {
     const source = body.custom_source || body.chat_completion_source || 'unknown source';
     log(`${label}: direct request via ${source}, model ${model || '(inherited)'}, ` +
         `~${estimateTokens(prompt)} prompt tokens, ${limit} max output, ` +
+        `${streamed ? 'streamed' : 'not streamed'}, ` +
         `${timeoutMs ? Math.round(timeoutMs / 1000) + 's limit' : 'no timeout'}`);
 
     const response = await fetchWithTimeout('/api/backends/chat-completions/generate', {
@@ -1201,7 +1238,7 @@ async function directCompletion(prompt, label) {
         body: JSON.stringify(body),
     }, label);
 
-    const raw = await response.text();
+    const raw = await readBodyWithProgress(response, label);
 
     if (!response.ok) {
         // The body usually carries the provider's own message, which says far
@@ -1215,16 +1252,22 @@ async function directCompletion(prompt, label) {
 
     // Read the body as text first: a proxy that answers with an HTML error page
     // or a stream would otherwise fail on response.json() and look like a crash.
+    const stream = extractStreamText(raw);
     let data = null;
     let parsed = true;
-    try {
-        data = JSON.parse(raw);
-    } catch {
-        parsed = false;
+    if (!stream.streamed) {
+        try {
+            data = JSON.parse(raw);
+        } catch {
+            parsed = false;
+        }
+    }
+    if (stream.streamed) {
+        log(`${label}: stream finished — ${stream.frames} frames, ~${estimateTokens(stream.text)} tokens`);
     }
 
     const finishReason = Array.isArray(data?.choices) ? data.choices[0]?.finish_reason : '';
-    const content = parsed ? extractCompletionText(data) : '';
+    const content = stream.text || (parsed ? extractCompletionText(data) : '');
 
     // A provider that filters the output reports it here while leaving the
     // visible content null. It looks like an empty reply unless we name it.
@@ -1240,8 +1283,8 @@ async function directCompletion(prompt, label) {
     if (content.trim()) return content;
 
     const note = describeEmptyAnswer({
-        error: parsed ? completionErrorText(data) : '',
-        reasoning: parsed ? reasoningText(data) : '',
+        error: stream.error || (parsed ? completionErrorText(data) : ''),
+        reasoning: stream.reasoning || (parsed ? reasoningText(data) : ''),
         finishReason: finishReason || '',
         parsed,
         contentType: response.headers.get('content-type') || '',
@@ -1424,12 +1467,23 @@ function describeFailure(error) {
 }
 
 /**
+ * Where the bytes of the request in flight are reported. One request runs at a
+ * time, so a single slot is enough — and it keeps the progress out of every
+ * function signature between the status line and the socket.
+ */
+let requestProgress = null;
+
+function reportProgress(chars) {
+    if (requestProgress) requestProgress(chars);
+}
+
+/**
  * Keep the status line alive while nothing else can report progress.
  *
  * A request that takes a minute looks identical to a hung one when the only
  * thing on screen is a status line that stopped changing, and there is no way to
- * tell whether the model is working. A ticking line is the difference between
- * "waiting" and "stuck".
+ * tell whether the model is working. A ticking line, and the number of characters
+ * that have arrived, are the difference between "waiting" and "stuck".
  */
 function statusTicker(render, intervalMs = 1000) {
     const el = document.getElementById('es_status');
@@ -1472,15 +1526,23 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
                 `~${promptTokens} prompt tokens, output limit ${outputLimit || 'inherited'}, ` +
                 `give up after ${Math.round(requestTimeoutMs() / 1000)}s`);
 
-            const stopTicking = statusTicker(() =>
-                `${label}: waiting for the model (${Math.round((Date.now() - startedAt) / 1000)}s, ` +
-                `~${promptTokens} tokens sent, up to ${outputLimit || '?'} back)...`);
+            let receivedChars = 0;
+            const stopTicking = statusTicker(() => {
+                const seconds = Math.round((Date.now() - startedAt) / 1000);
+                if (!receivedChars) {
+                    return `${label}: waiting for the model (${seconds}s, ~${promptTokens} tokens sent, ` +
+                        `up to ${outputLimit || '?'} back)`;
+                }
+                return `${label}: generating (${seconds}s, ~${formatTokens(Math.round(receivedChars / 4))} tokens received)`;
+            });
+            requestProgress = (chars) => { receivedChars = chars; };
 
             let answer;
             try {
                 answer = await runCompletionOnce(prompt, fallbackTokens);
             } finally {
                 stopTicking();
+                requestProgress = null;
             }
 
             // A backend that answered with nothing comes back as a reason rather
@@ -2555,6 +2617,15 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
+                    <input type="checkbox" id="es_stream_requests" ${settings.streamRequests !== false ? 'checked' : ''}>
+                    Stream archival requests
+                </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>Keeps a long generation alive behind a proxy or gateway that cuts off requests producing nothing, and shows the characters arriving so a slow run is visibly a working one. Turn it off if your provider streams badly.</span>
+            </div>
+            <div class="enhanced-summary-row">
+                <label class="enhanced-summary-label">
                     Give up on one request after (sec)
                     <input type="number" id="es_request_timeout" value="${settings.requestTimeoutSeconds}" min="0" max="7200" step="15" style="width: 100px;">
                 </label>
@@ -3003,6 +3074,11 @@ function bindUIEvents() {
     document.getElementById('es_request_timeout')?.addEventListener('change', (e) => {
         settings.requestTimeoutSeconds = Math.max(0, Math.min(7200, parseInt(e.target.value) || 0));
         e.target.value = settings.requestTimeoutSeconds;
+        saveSettingsDebounced();
+    });
+
+    document.getElementById('es_stream_requests')?.addEventListener('change', (e) => {
+        settings.streamRequests = e.target.checked;
         saveSettingsDebounced();
     });
 

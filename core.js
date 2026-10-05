@@ -412,6 +412,68 @@ export function repairedText(msg) {
 }
 
 /**
+ * Read the answer out of a streamed response, whatever shape its frames are in.
+ *
+ * With streaming on, SillyTavern pipes the provider's own server-sent events
+ * straight through, so every `data:` frame is one object of that provider's
+ * shape: an OpenAI delta, an Anthropic text delta, a Google part, a Cohere text
+ * field. Running each frame through the same extractor and concatenating the
+ * pieces handles all of them without a parser per provider.
+ *
+ * A body that turns out not to be a stream at all is read as one object, so a
+ * backend that ignores `stream: true` keeps working unchanged.
+ */
+export function extractStreamText(raw) {
+    const body = String(raw ?? '');
+    const empty = { text: '', reasoning: '', frames: 0, error: '', streamed: false };
+    if (!body.trim()) return empty;
+
+    if (!/^\s*(data:|event:|id:|retry:)/m.test(body)) {
+        let data;
+        try {
+            data = JSON.parse(body);
+        } catch {
+            return empty;
+        }
+        return {
+            text: extractCompletionText(data),
+            reasoning: reasoningText(data),
+            frames: 1,
+            error: completionErrorText(data),
+            streamed: false,
+        };
+    }
+
+    let text = '';
+    let reasoning = '';
+    let frames = 0;
+    let error = '';
+
+    for (const line of body.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+
+        const payload = trimmed.slice('data:'.length).trim();
+        // The terminator frame carries no content.
+        if (!payload || payload === '[DONE]') continue;
+
+        let data;
+        try {
+            data = JSON.parse(payload);
+        } catch {
+            continue;
+        }
+
+        frames++;
+        if (!error) error = completionErrorText(data);
+        if (!reasoning) reasoning = reasoningText(data);
+        text += extractCompletionText(data);
+    }
+
+    return { text, reasoning, frames, error, streamed: true };
+}
+
+/**
  * Split the two variable blocks of the summary request into what is actually
  * left of the context window.
  *
@@ -518,6 +580,9 @@ export function extractCompletionText(data) {
     if (Array.isArray(data.content)) return joinBlocks(data.content);
     if (typeof data.message?.content === 'string') return data.message.content;
     if (Array.isArray(data.message?.content)) return joinBlocks(data.message.content);
+
+    // One Anthropic streaming frame: the text arrives as a delta of a block.
+    if (typeof data.delta?.text === 'string') return data.delta.text;
 
     // Cohere and the legacy completion APIs.
     if (typeof data.text === 'string') return data.text;

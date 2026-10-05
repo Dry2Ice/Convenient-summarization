@@ -61,6 +61,7 @@ SillyTavern.
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
 | Give up on one request after | Wall-clock limit for a single request. A request still running after this is cut off, reported and retried instead of hanging the run. 0 removes the limit. |
+| Stream archival requests | On by default. Keeps a long generation alive behind a proxy that cuts off requests producing nothing, and shows the arriving characters so a slow run is visibly a working one. Frames are read in whatever shape the provider sends them; a provider that ignores streaming still works. |
 | Retry attempts / Delay between retries | How often a failed or empty request is retried, and how long the pause is. The status line counts the pause down. |
 | View Current Summary / View Archive | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
 | Reset & Re-absorb | Discards the archive, summary and lorebook, releases every message, and re-archives from scratch. |
@@ -92,6 +93,12 @@ empty is reported with its cause rather than as "empty response":
 Everything is logged to the browser console under `[enhancedSummary]`: the source,
 the model, the prompt size, the budgets, the elapsed time and the reason for
 every failure. That line is the fastest way to see which of these it was.
+
+A summary request that outgrows the context window is the failure that looks
+least like a model problem: stage 1 sends a fraction of what stage 2 does, so it
+succeeds and stage 2 fails identically with every model. The reason is the size
+of the request, and it appears in the log as `CAPPED (window)` or
+`CAPPED (share)`.
 
 ## Notes
 
