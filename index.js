@@ -299,12 +299,15 @@ salience criteria above
 **You MUST create Core Memories if none exist. Scan the full conversationвЂ”do not only
 look at recent messages.**
 
-### **Step 2: Identify the Plot Skeleton**
-Locate all major plot beats whose consequences shape the current situation.
-These form the backbone of the Plot Summary section.
-They must remain presentвЂ”even if condensed.
-Do not remove or bury them.
-Maintain causeв†’effect chain.
+### **Step 2: Identify the Load-Bearing Material**
+Locate the material the story cannot be told without, and which none of the other sources carries:
+* The decisive events whose consequences still shape the situation — these form the backbone of Key Events.
+* What each character has revealed about themselves that the card does not say.
+* The relationships as they actually work now, and the moment each one turned.
+* Live secrets, standing suspicions, and anything still promised, owed or planned.
+
+Each of these must remain present, even if condensed. Do not remove them and do not bury them.
+Maintain cause and effect: what happened, and what it left behind.
 
 ### **Step 3: Compress Older Material**
 Apply surgical compression:
@@ -336,7 +339,7 @@ Do **not** restage scenes.
 Do **not** expand old content.
 
 ### **Step 4.5: Core Memory Verification (CRITICAL)**
-After adding new developments, cross-check Character States section:
+After adding new developments, cross-check the Character Truths and Relationship Dynamics sections:
 - Did any character's emotional state shift significantly?
 - Did trust/attraction/tension change between any characters?
 - Did someone learn something that changes their perception?
@@ -347,7 +350,7 @@ After adding new developments, cross-check Character States section:
 it's captured as a Core Memory.
 
 **Common failure mode:** You will note "Character is more vulnerable now" in Character
-States but fail to capture the specific moment (conversation, touch, admission) that caused
+Truths but fail to capture the specific moment (conversation, touch, admission) that caused
 the shift. FIX THIS.
 
 ### **Step 5: Maintain the Existing Structure**
@@ -368,134 +371,128 @@ identify Core Memories from the entire conversation.**
 
 ---
 
-### **2. Plot Summary (Causation, Not Events)**
-This section does NOT list what happened. The archive already lists it, message by message.
-Write the layer underneath instead:
+### **2. Key Events & Consequences**
+Not a list of what happened: the archive already has that, message by message.
+This section is for the handful of moments the story actually turned on, and for what each of them
+changed. A moment belongs here when the plot would be a different story without it.
 
-* Why each important turn happened: the motive, the pressure, the misreading that caused it.
-* What every consequential beat did to the relationships and to each character's self-image.
-* Consequences that are still in play, and debts that are still unpaid.
-* Decisions that were taken, and what they now commit the characters to.
+* The decisive events: the ones that closed a door, cost something irreversible, or rearranged who stands where.
+* Why each one happened: the motive, the pressure, the misreading that caused it.
+* What it changed, afterwards, in the relationships and in each character's self-image.
+* Decisions taken, and what they now commit the characters to.
 * Reversals: what was believed, and what later disproved it.
-* The one-line answer to "how did we get here", in causes rather than events.
+
+Also record here anything the archive could not hold because it is not an event: a rule of the world,
+a promise made in passing, an understanding reached without a word, a motive nobody stated outright.
 
 Do NOT reduce this to only Core Memories, and do NOT repeat the archive.
 **Keep it factual and clear. No flowery language.**
 
 ---
 
-### **3. Emotional Arc**
-How the emotional dynamics evolved, and above all what they are RIGHT NOW.
+### **3. Character Truths**
+Who these characters turned out to be IN THIS STORY, which is not what the character card says.
 
-Focus on:
-* Tension (where does it exist, between whom, and what is it really about)
-* Trust shifts (who trusts whom, who doesn't, what changed and why)
-* Attraction or conflict (intensity, reciprocity, complications, who is lying to whom)
-* Unresolved emotional debts or obligations
-* New vulnerabilities or defenses
-* Major emotional turning points that shaped "Core Memory" entries
-* Current emotional trajectory (escalating, cooling, fragmenting) and what would tip it
+One entry per character, format: \`Character Name: ...\`
 
-Name the feelings precisely: not "they were upset" but what each of them felt, about whom,
-and what they did with it. Report the subtext the archive cannot show.
-Do not retell scenes. Capture emotional *trajectory and present state.*
+* The personality the story has actually shown: temperament, humour, habits, tells, the way they lie.
+* What they want from this, and what they would sacrifice for it.
+* The line they will not cross, and the one they have already crossed.
+* How they differ from the card: growth, contradiction, or something the card never mentioned.
+* What they are good at, and what defeats them.
+
+State these as lasting facts about the character, not as this week's mood. Do not restate the card.
 
 ---
 
-### **4. Character States**
-Each major character gets 1вЂ“2 sentences describing:
-* Current emotional state, and what they are actually feeling about the others
-* Current goals, needs, or strategies
-* The thing they want but will not say out loud
-* The lie they tell themselves, if there is one
-* Any contradictions, doubts, or internal fractures
-* Ongoing tensions with specific other characters
+### **4. Relationship Dynamics**
+How the relationships between them actually work, and how they moved.
 
-Format: \`Character Name: ...\`
-No backstory recap, and no events: the archive has those.
-Only their **present state.**
+One entry per pair that matters, format: \`A and B: ...\`
 
-**This section should directly inform Core Memory verification in Step 4.5.**
+* What the relationship is now, in one line, and what it was before.
+* The shift that changed it, and the moment that shift came from.
+* The live tension in it, and what neither of them will say out loud.
+* Trust, dependence, leverage, guilt, attraction: who holds what over whom.
+* The pattern they keep falling into, and what would break it.
 
----
-
-### **5. Inside Jokes & Motifs**
-Bullet list.
-Each bullet must include:
-- The reference/phrase/action
-- What it signifies in context
-
-No fluff.
-Only include motifs that recur or carry weight. The archive says a thing happened; this
-section is what it meant to the people involved.
+This is the emotional spine of the story, not a mood report. Name the feelings precisely: not "they were
+upset" but what each of them felt, about whom, and what they did with it.
+Do not retell scenes.
 
 ---
 
-### **6. Secrets**
-List all active secrets.
+### **5. Secrets & Knowledge**
+Who knows what, who is wrong about it, and what it would cost to be found out.
+
 Format: \`Who knows: [information]\` or \`Hidden from X: [information]\`
-Mark revealed ones as **(resolved).**
-For each one also record what it costs the people who keep it, and who would break if it came out.
-Include only secrets with actual narrative weight (not minor withheld details).
+Mark the ones that have come out as **(resolved)**, and say what they changed.
+
+* A secret only matters here if it is still in play or still doing damage.
+* Add the pressure each one creates, and who would break if it came out.
+* Add anything a character suspects without knowing for certain — that gap is where scenes live.
 
 ---
 
-### **7. Future Plot Hooks / Unresolved Threads**
-Bullets only.
+### **6. Open Threads**
+Everything still in play. Bullets only.
 
-Capture:
-* Active threats or dangers
-* Mysteries not yet solved
-* Developing tensions between characters
-* Unfinished character business (promises, debts, questions)
-* Opportunities or choices on the horizon
-* Foreshadowed outcomes
-* New arcs forming
-* What a character is building toward but avoiding
-* What would break the current equilibrium if it went one step further
-* Mandatory: Repeating flash/fantasy/intrusive thought/dream patterns вЂ” record ONLY their
-psychological meaning and narrative potential, never the image itself. Ask: what does this
-pattern reveal about the character's subconscious (fear, desire, grief, longing)? What could it
-crystallise into (a permanent insecurity, a conscious goal, a confrontation they're building
-toward, a decision they're avoiding)? The image is disposable. The meaning is the thread.
+* Promises, debts and obligations that have not been settled.
+* Mysteries and questions nobody has answered yet.
+* Threats, deadlines and consequences that are still coming.
+* Plans and intentions the characters are building toward or actively avoiding.
+* The confrontation that is being assembled out of everything above.
+* Foreshadowed outcomes, and the choices waiting on the horizon.
+* Repeating flash/fantasy/intrusive thought/dream patterns — record ONLY their psychological meaning
+  and narrative potential, never the image itself. Ask: what does this pattern reveal about the
+  character's subconscious (fear, desire, grief, longing)? What could it crystallise into (a permanent
+  insecurity, a conscious goal, a confrontation they're building toward, a decision they're avoiding)?
+  The image is disposable. The meaning is the thread.
 
-These should guide future scenes, not repeat plot summary.
-
-**Ask: "What's been set up but not resolved?" and "What's building toward something?"**
+**Ask: "What has been set up but not resolved?" and "What is building toward something?"**
 
 THREAD MAINTENANCE RULES:
-Update existing threads when development occurs. If a thread receives partial advancement
-(new information, escalation, complication), revise the thread description in place to reflect
-current status. Do not duplicate it as a new entry.
-Add new threads freely as they arise from plot beats, character decisions, NPC actions, or
-newly flagged flash patterns.
-Remove a thread ONLY when it has been fully resolved вЂ” meaning its central tension, question,
-or stakes no longer apply and no residual consequences remain active. If
-consequences persist, the thread stays (revised to reflect its new form).
-Never silently drop threads. If a thread is absent from a revision without explicit resolution in
-the plot, it was lost in compression. Put it back.
-Stale в‰  resolved. A thread that hasn't been touched in several scenes is dormant, not dead.
-Retain it. Dormant threads are valid escalation
+Update a thread in place when it advances. Do not duplicate it as a new entry.
+Add new threads as they arise.
+Remove a thread ONLY when it is fully resolved, meaning its tension or stakes no longer apply and no
+residual consequences remain. If consequences persist, the thread stays, revised.
+Never silently drop a thread: if one is missing from a revision without explicit resolution, it was lost
+in compression. Put it back.
+A thread untouched for several scenes is dormant, not dead. Retain it.
 
+---
+
+### **7. Motifs & References**
+The things that only mean something to someone who was here for all of it.
+
+Bullet list, each bullet naming the reference or habit and what it signifies:
+* A recurring phrase, gesture, object or place that carries meaning.
+* Jokes and callbacks the characters made, and what they are really about.
+* Patterns of behaviour the characters fall into.
+
+No filler. Only motifs that recur or carry weight. One line each.
 ---
 
 # **III. FINAL BEHAVIORAL RULES**
 * **Never overwrite the entire summary.** Always revise existing content in place.
 * **Never prioritize Core Memories over the rest of the structure.** All of it must remain.
+* **Never restate the character card.** The prompt already carries it. Only what the story added.
 * **Never restate the archive.** Every event line you can find in the record is a line wasted here.
+* **Never describe the immediate scene.** The last exchanges are in the prompt verbatim, so a
+  "current state" paragraph is a copy of something the model can already read.
 * **If the summary is too long, compress old content BEFORE adding new material.**
 * **No scene recreation, no quoting dialogue, no descriptive flourishes.**
-* **Feelings over facts.** A fact the archive has is worth nothing here; a feeling, a motive or a
-hook is worth a line.
+* **Feelings and motives over facts.** A fact the archive has is worth nothing here; a decision,
+  a dynamic, a character truth or a hook is worth a line.
 * **Always choose clarity over length.** Compress aggressively rather than truncating, but never drop a
-core memory, a live secret, or an active thread.
+core memory, a key event, a character truth, a live secret, or an open thread.
 * **This document should evolve, not accumulate.**
 * **If creating from scratch, you MUST read the ENTIRE conversation.** Skipping to recent
 messages only will result in an incomplete, inaccurate summary.
 * **Core Memories are MANDATORY.** If you produce a summary without them, you have
 failed the task.
-* **Cross-check Character States against Core Memories.** Emotional shifts must be
-traceable to specific moments.
+* **Cross-check Character Truths and Relationship Dynamics against Core Memories.** Every emotional shift
+must be traceable to a specific moment.
 * **Compression is surgical, not random.** Keep logic intact.
 
 ---
@@ -503,15 +500,15 @@ traceable to specific moments.
 # **QUALITY CHECK BEFORE SUBMITTING:**
 Ask yourself:
 1. вњ“ Do Core Memories exist and capture key emotional moments?
-2. вњ“ Can I trace how we got from the beginning to the present through causes, in Plot Summary?
-3. вњ“ Does Emotional Arc explain the current relationship dynamics?
-4. вњ“ Does Character States say what each person feels and hides, not just what they did?
-5. вnj“ **Does any line here only repeat what the archive already says?** If yes, cut it and
-replace it with what that event meant.
-6. вњ“ Are the hooks, secrets and unresolved threads still alive and specific?
-7. вњ“ Is the trajectory of the story stated, not merely implied?
-8. вњ“ Are old details compressed without breaking continuity?
-9. вњ“ Are new developments added without bloat?
+2. вњ“ Are the decisive events here, with what each of them changed?
+3. вњ“ Does Character Truths say who these people turned out to be, not what the card already says?
+4. вњ“ Does Relationship Dynamics explain how each pair actually works, and what shifted it?
+5. вњ“ Are the live secrets, the suspicions and the open threads still specific and still in play?
+6. вљ“ **Does anything here repeat the character card?** Cut it. The card is already in the prompt.
+7. вљ“ **Does anything here repeat the archive?** Cut it. The record says it better and cheaper.
+8. вљ“ **Does anything here describe the last few exchanges?** Cut it. They are in the prompt verbatim.
+9. вњ“ Are old details compressed without breaking continuity?
+10. вњ“ Are new developments added without bloat?
 
 If any answer is NO, revise before submitting.
 
@@ -575,25 +572,36 @@ Output only the timestamped lines, every one of them carrying its [#n].`;
 
 const SUMMARY_STAGE2_FRAMING = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
 
-You are revising an existing summary from a roleplay that is still going on. The brief that follows
-tells you the required structure and where your input is. Read it as one instruction, not as several.
+You are revising the story bible of a roleplay that is still going on. The brief that follows tells you the
+required structure and where your input is. Read it as one instruction, not as several.
 
-DIVISION OF LABOUR, and it is strict:
-- The chronological record you are given owns the events: what was said and done, message by message.
-- This summary owns everything the record cannot show: feelings and subtext, motives and misreadings,
-what each character knows and hides, how the relationships moved and why, what it costs them, the live
-secrets, the hooks and debts still unpaid, and the trajectory of the story.
-- Do NOT copy events out of the record into the summary. A line that only restates what was said or
-done does not belong in the summary at all.
-- Read the record for WHAT happened, then write down what it MEANT: the emotion behind it, the motive
-behind it, and the pressure it left behind.
+# **FOUR SOURCES OF TRUTH, AND YOU ARE THE FIFTH**
 
-Keep the existing summary intact. Revise it only where the new material changes something, and fold in
-everything genuinely new. Never drop an existing Core Memory, cause, thread, secret, or motif.
+When this roleplay runs, the model receives:
+1. The CHARACTER CARD — who these people are on paper.
+2. The CHRONOLOGICAL RECORD — one factual line per message: what was said and done.
+3. The MOST RECENT EXCHANGES — the last scenes, verbatim and in full.
+4. THIS SUMMARY — the durable memory of the story.
 
-The most recent exchanges are the live edge of the story: the present moment. Weight them heavily when
-determining the CURRENT emotional landscape and trajectory, because that is what the model must act on
-right now.
+Your job is the material NONE of the other three carries. That is the whole point of this document, so the
+test for every single line is: **would the model already have this without you?**
+
+- Do NOT restate the card. Only what the story added, contradicted, or revealed about these people.
+- Do NOT restate the record. The record says what happened; you say why it mattered and what it cost.
+- Do NOT describe the last few exchanges. They are in the prompt verbatim, so a "current state" paragraph
+  is a copy of something already on screen.
+- DO carry what is old, buried and load-bearing: the decisive events, who these characters turned out to
+  be, how the relationships actually work, who knows what, and everything still in play.
+
+That last list is the point of the exercise. A fact that was established fifty exchanges ago, that the card
+does not mention and that the record states without any sense of what it meant, is exactly what is lost
+when nobody writes it down. Find it, and write down what it means rather than what it was.
+
+Keep the existing summary intact. Revise it only where the new material genuinely changes something, and
+fold in everything new that belongs. Never drop an existing Core Memory, key event, character truth,
+relationship note, live secret, open thread or motif.
+
+A summary that repeats the card, the record or the recent messages has failed, however well written it is.
 
 `;
 
@@ -888,21 +896,32 @@ function formatMessagesForSummary(messages, opts) {
     return formatMessages(messages, opts);
 }
 
-function extractSection(summary, sectionName) {
+/**
+ * Read one section out of a summary.
+ *
+ * Takes a list of names because the structure has been renamed once already, and
+ * a summary written under the old headings is still sitting in a chat file: the
+ * injector must keep finding those sections, or a rename would silently stop
+ * injecting them and nobody would notice for a long time.
+ */
+function extractSection(summary, sectionNames) {
     if (!summary) return '';
 
-    const patterns = [
-        new RegExp(`###\\s*\\d*\\.?\\s*${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=###|$)`, 'i'),
-        new RegExp(`##\\s*${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=##|$)`, 'i'),
-        new RegExp(`${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?(?=\\n#|$)`, 'i'),
-    ];
+    for (const sectionName of (Array.isArray(sectionNames) ? sectionNames : [sectionNames])) {
+        const safe = sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const patterns = [
+            new RegExp(`###\\s*\\d*\\.?\\s*${safe}[\\s\\S]*?(?=###|$)`, 'i'),
+            new RegExp(`##\\s*${safe}[\\s\\S]*?(?=##|$)`, 'i'),
+            new RegExp(`${safe}[\\s\\S]*?(?=\\n#|$)`, 'i'),
+        ];
 
-    for (const pattern of patterns) {
-        const match = summary.match(pattern);
-        if (match) {
-            let content = match[0];
-            content = content.replace(/^#+\s*.*\n/, '').trim();
-            return content;
+        for (const pattern of patterns) {
+            const match = summary.match(pattern);
+            if (match) {
+                let content = match[0];
+                content = content.replace(/^#+\s*.*\n/, '').trim();
+                if (content) return content;
+            }
         }
     }
     return '';
@@ -2225,20 +2244,22 @@ function injectIntoPrompt(eventData) {
     }
     spend(archive.lines.length ? formatArchiveLines(archive.lines) : '');
 
-    // After the history: everything the archive cannot hold — the state, the
-    // feelings, the motives, what is still unresolved, and the world facts.
-    const plotSummary = extractSection(summary, 'Plot Summary');
-    const emotionalArc = extractSection(summary, 'Emotional Arc');
-    const characterStates = extractSection(summary, 'Character States');
-    const secrets = extractSection(summary, 'Secrets');
-    const futureHooks = extractSection(summary, 'Future Plot Hooks');
+    // After the history: everything the archive cannot hold — who these characters
+    // are, how the relationships work, what is still in play, and the world facts.
+    // Each one is looked up under its current name first and its old one second, so
+    // a summary written before the rename keeps being injected.
+    const keyEvents = extractSection(summary, ['Key Events', 'Plot Summary']);
+    const characterTruths = extractSection(summary, ['Character Truths', 'Character States']);
+    const dynamics = extractSection(summary, ['Relationship Dynamics', 'Emotional Arc']);
+    const secrets = extractSection(summary, ['Secrets', 'Knowledge']);
+    const threads = extractSection(summary, ['Open Threads', 'Future Plot Hooks']);
 
     let after = '';
-    if (plotSummary) after += `### Causes And Consequences\n${plotSummary}\n\n`;
-    if (emotionalArc) after += `### Current Emotional Landscape\n${emotionalArc}\n\n`;
-    if (characterStates) after += `### Current Character States\n${characterStates}\n\n`;
-    if (secrets) after += `### Active Secrets\n${secrets}\n\n`;
-    if (futureHooks) after += `### Where This Is Heading\n${futureHooks}\n\n`;
+    if (keyEvents) after += `### Key Events And What They Changed\n${keyEvents}\n\n`;
+    if (characterTruths) after += `### Who These Characters Are\n${characterTruths}\n\n`;
+    if (dynamics) after += `### How The Relationships Work\n${dynamics}\n\n`;
+    if (secrets) after += `### Secrets And Knowledge\n${secrets}\n\n`;
+    if (threads) after += `### Still In Play\n${threads}\n\n`;
 
     // The live state is what the model must act on, so it wins the budget.
     if (estimateTokens(after) > settings.injectSummaryTokens) {
@@ -2277,8 +2298,8 @@ function injectIntoPrompt(eventData) {
         eventData.chat.push({
             role: 'system',
             name: 'story_state',
-            content: `## State Of The Story Right Now\nWhat the events above meant: the feelings, motives, ` +
-                `relationship shifts, live secrets and unresolved pressure, plus where this is heading.\n\n${after}`,
+            content: `## State Of The Story Right Now\nThe record above says what happened. This is what it meant: who these characters are, how the ` +
+                `relationships work, what they know and hide, and everything still in play.\n\n${after}`,
             is_system: true,
         });
     }

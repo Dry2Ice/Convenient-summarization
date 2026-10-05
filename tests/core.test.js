@@ -1228,13 +1228,12 @@ test('the archive and the summary are told to keep different jobs', async () => 
     assert.match(summary, /Never restate the archive/i);
     // The injector looks these up by name, so renaming one silently stops it
     // from ever being injected again.
-    for (const section of ['Core Memories', 'Plot Summary', 'Emotional Arc', 'Character States', 'Secrets', 'Future Plot Hooks']) {
+    for (const section of ['Core Memories', 'Key Events', 'Character Truths', 'Relationship Dynamics', 'Secrets', 'Open Threads']) {
         assert.ok(summary.includes(section), `the summary prompt must keep the "${section}" section`);
     }
 
     const stage2 = grab('SUMMARY_STAGE2_FRAMING');
-    assert.match(stage2, /do NOT copy events out of the record into the summary/i);
-    assert.match(stage2, /what it MEANT/i);
+    assert.match(stage2, /A summary that repeats the card, the record or the recent messages has failed/i);
 
     // The structural template used to be appended raw, so the model was handed
     // the same brief twice and ended with literal {{summary}} and
@@ -1490,6 +1489,61 @@ test('a reset is written to disk at once, not on the debounce', async () => {
         assert.ok(/saveSettingsNow\(\)/.test(window),
             `${what} writes through immediately so a reload cannot undo it`);
     }
+});
+
+test('the summary is told to be the fifth source, not a copy of the other four', async () => {
+    // The request that matters: the model already receives the character card, the
+    // record and the last exchanges. Everything the summary repeats is tokens
+    // spent saying what is already there.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const framing = src.match(/const SUMMARY_STAGE2_FRAMING = `([\s\S]*?)`;/)[1];
+
+    assert.match(framing, /FOUR SOURCES OF TRUTH/);
+    assert.match(framing, /CHARACTER CARD/);
+    assert.match(framing, /CHRONOLOGICAL RECORD/);
+    assert.match(framing, /MOST RECENT EXCHANGES/);
+    assert.match(framing, /Do NOT restate the card/i);
+    assert.match(framing, /Do NOT restate the record/i);
+    assert.match(framing, /Do NOT describe the last few exchanges/i);
+    // The old brief pushed the opposite way: present-moment first, always.
+    assert.ok(!/Weight them heavily when\s+determining the CURRENT/i.test(framing),
+        'the summary must not be steered towards the present moment any more');
+
+    const template = src.match(/const SUMMARY_PROMPT_TEMPLATE = `([\s\S]*?)`;/)[1];
+    for (const section of [
+        'Core Memories',
+        'Key Events & Consequences',
+        'Character Truths',
+        'Relationship Dynamics',
+        'Secrets & Knowledge',
+        'Open Threads',
+        'Motifs & References',
+    ]) {
+        assert.ok(template.includes(section), `the structure must keep "${section}"`);
+    }
+    assert.match(template, /never restate the character card/i);
+    assert.match(template, /never describe the immediate scene/i);
+    assert.match(template, /who these people turned out to be/i);
+    assert.ok(!/Current Emotional Landscape|Current Character States/.test(template),
+        'the state-reporting headings are gone');
+});
+
+test('a renamed section is still injected under its old name', async () => {
+    // A summary written before the rename is still sitting in chat files. If the
+    // injector only knew the new names, those sections would quietly stop being
+    // injected and nobody would find out until the context looked thin.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const pairs = [
+        ["['Key Events', 'Plot Summary']", 'Key Events', 'Plot Summary'],
+        ["['Character Truths', 'Character States']", 'Character Truths', 'Character States'],
+        ["['Relationship Dynamics', 'Emotional Arc']", 'Relationship Dynamics', 'Emotional Arc'],
+        ["['Open Threads', 'Future Plot Hooks']", 'Open Threads', 'Future Plot Hooks'],
+    ];
+    for (const [literal, current, legacy] of pairs) {
+        assert.ok(src.includes(literal), `${current} must fall back to ${legacy}`);
+    }
+    assert.match(src, /function extractSection\(summary, sectionNames\)/);
+    assert.match(src, /Array\.isArray\(sectionNames\) \? sectionNames : \[sectionNames\]/);
 });
 
 test('countExchanges counts user turns and never returns zero', () => {

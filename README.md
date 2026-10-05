@@ -8,10 +8,14 @@ Two documents replace the raw history:
 
 - **Chronological archive** — one short line per message: what was said and
   done. Facts only, no interpretation.
-- **Current Summary** — everything the archive cannot hold: feelings and subtext,
-  motives and misreadings, how the relationships moved, what each character knows
-  and hides, the cost of every live secret, the promises and debts still unpaid,
-  and where the story is heading.
+- **Current Summary** — the fifth source of truth. The model already receives the
+  character card, the chronological record and the last exchanges in full, so the
+  summary carries only what none of them does: the decisive events and what they
+  changed, who these characters turned out to be in this story (as opposed to on
+  the card), how the relationships actually work and what shifted them, who knows
+  and hides what, and everything still in play. Sections: Core Memories, Key
+  Events & Consequences, Character Truths, Relationship Dynamics, Secrets &
+  Knowledge, Open Threads, Motifs & References. Both panels are hand-editable.
 
 The split is what makes it cheap: neither document repeats the other, so no
 context is paid for twice.
@@ -54,15 +58,16 @@ SillyTavern.
 4. **Lorebook.** Optional pass that extracts permanent world facts from the
    archive.
 5. **Inject.** Before the history: the emotional anchors and the archive. After
-   the history: causes, emotional landscape, character states, active secrets,
-   open threads and the world facts. Both blocks are token-budgeted.
+   the history: key events, who these characters are, how the relationships work,
+   secrets and knowledge, and what is still in play. Everything is bounded by the
+   one injection ceiling.
 
 ## Settings worth knowing
 
 | Setting | What it does |
 | --- | --- |
 | Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. This is the biggest lever on how hard the chat compresses. |
-| Everything injected, hard ceiling | The one number that decides the size of every request. The state the model acts on is kept first, the world facts are sacrificed first. |
+| Everything injected, hard ceiling | The one number that decides the size of every request. The durable story memory is kept first, the world facts are sacrificed first. |
 | Archive when N unarchived messages accumulate | The auto-trigger for a run. |
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
