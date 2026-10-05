@@ -9,13 +9,7 @@ export const ORIGINAL_MES_KEY = 'es_original_mes';
 export const HIDDEN_FLAG = 'es_prompt_hidden';
 export const PLACEHOLDER = '[Absorbed into the story chronicle - hidden from the model.]';
 
-const CHRONICLE_NOISE_RE = /^(here (is|are)|output|chronolog\w*|record|===|```|\[note|note:|sure|certainly|of course)/i;
-
 /** Strip markdown emphasis so `**[Day 1 09:12]**` parses like a bare label. */
-export function stripEmphasis(line) {
-    return String(line).replace(/[*_`~>#|]/g, '').trim();
-}
-
 const REASONING_BLOCK_RE = /<(think|thinking|thought|reasoning|scratchpad)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
 const REASONING_TAIL_RE = /<(?:think|thinking|thought|reasoning|scratchpad)\b[^>]*>[\s\S]*$/i;
 const REASONING_CLOSE_RE = /<\/(?:think|thinking|thought|reasoning|scratchpad)\s*>/gi;
@@ -46,162 +40,88 @@ export function estimateTokens(text) {
 }
 
 /**
- * Parse the archivist output into timestamped lines.
- * A line only counts as parsed if it actually carries a timestamp, unless
- * allowUndated is set.
+ * Split the record into blocks.
+ *
+ * The record is a document the model writes, grouped by the time spans it chooses,
+ * so the block headings it uses are honoured. Anything it wrote without a heading
+ * is cut into windows of roughly the same size, because the lorebook pass still
+ * has to walk the whole thing in small requests.
  */
-export function parseChronicleBlock(text, { allowUndated = false } = {}) {
-    if (!text) return { entries: [], datedCount: 0, totalNonEmpty: 0 };
+export function recordBlocks(record, { targetChars = 1800 } = {}) {
+    const text = String(record ?? '').trim();
+    if (!text) return [];
 
-    const entries = [];
-    let datedCount = 0;
-    let totalNonEmpty = 0;
+    const chunks = [];
+    const lines = text.split('\n');
+    let current = [];
 
-    const lineRe = /^\s*[[(]?\s*(?:Day\s*(\d+)[^\])]*?(\d{1,2}:\d{2})|\d{4}-\d{2}-\d{2}[T\s]*(\d{1,2}:\d{2})?|(\d{1,2}:\d{2}))\s*[\])]?\s*(.*)$/;
+    const flush = () => {
+        const joined = current.join('\n').trim();
+        if (joined) chunks.push(joined);
+        current = [];
+    };
 
-    for (const raw of String(text).split('\n')) {
-        const stripped = stripEmphasis(raw);
-        const line = raw.trim();
-        if (!line) continue;
-        if (CHRONICLE_NOISE_RE.test(line)) continue;
-        if (/^```/.test(line)) continue;
+    for (const line of lines) {
+        // A heading starts a new block: it is what the model used to group by.
+        if (/^#{1,3}\s/.test(line) && current.some(l => l.trim())) flush();
+        current.push(line);
 
-        totalNonEmpty++;
-
-        // A bracketed label is taken verbatim whenever it looks like a stamp.
-        // Real headers produce "July 12, 2025 1:15 PM", which no fixed pattern
-        // would ever match.
-        const bracket = stripped.match(/^\s*[[(]\s*([^)\]]{1,64}?)\s*[\])]\s*(.*)$/);
-        if (bracket && isTimestampLabel(bracket[1])) {
-            const { id, text } = splitChronicleId(bracket[2].trim());
-            if (text) {
-                datedCount++;
-                entries.push({ ts: bracket[1].trim(), id, text });
-                continue;
-            }
+        // An unheaded block still has to stay small enough for one request.
+        if (current.join('\n').length >= targetChars && !/^#{1,3}\s/.test(line.trim())) {
+            // Only cut on a blank line, so a sentence is never split in half.
+            if (line.trim() === '') flush();
         }
-
-        const m = stripped.match(lineRe);
-        if (!m) {
-            // A line that carries an index but no stamp is still a record of
-            // that message: dropping it would hide a gap in the coverage.
-            const undated = splitChronicleId(stripped);
-            if (allowUndated || undated.id) entries.push({ ts: '', id: undated.id, text: undated.text || stripped });
-            continue;
-        }
-
-        const day = m[1] ? `Day ${m[1]}` : '';
-        const time = m[2] || m[3] || m[4] || '';
-        const ts = [day, time].filter(Boolean).join(' ');
-        const { id, text } = splitChronicleId((m[5] || '').trim());
-        if (!text) continue;
-
-        datedCount++;
-        entries.push({ ts, id, text });
     }
+    flush();
 
-    return { entries, datedCount, totalNonEmpty };
+    if (!chunks.length && text) return [text];
+    return chunks;
 }
 
 /**
- * Pull the index off the front of a record line, so a line can be traced back
- * to the message it came from.
+ * Add newly written blocks to the record.
  *
- * The `#` is optional because emphasis stripping runs before this and removes it:
- * the line is matched for coverage either way, and dropping a line because its
- * index lost a character would hide the gap this exists to show.
+ * Returns the joined document and whether the addition looks like a copy of what
+ * is already there: models asked for "just the new part" occasionally answer with
+ * the whole document instead, and silently appending that duplicates the history.
  */
-function splitChronicleId(body) {
-    const m = String(body ?? '').match(/^\s*\[#?\s*(\d{1,6})\]\s*(.*)$/);
-    if (!m) return { id: '', text: String(body ?? '').trim() };
-    return { id: m[1], text: m[2].trim() };
-}
+export function appendRecord(record, addition) {
+    const before = String(record ?? '').trim();
+    const extra = String(addition ?? '').trim();
+    if (!extra) return { record: before, duplicated: false, added: 0 };
+    if (!before) return { record: extra, duplicated: false, added: 1 };
 
-/**
- * Which of the given messages the record actually covers.
- *
- * Counting lines cannot tell "the model merged two messages" from "the model
- * dropped one". Indices can: every input line carries its number and has to come
- * back, so a missing number names the message that was lost.
- */
-export function verifyChronicleCoverage(entries, expectedIds) {
-    const expected = (expectedIds || []).map(id => String(id));
-    if (!expected.length) return { checked: false, ok: true, missing: [], duplicated: [], extra: [], ratio: 1 };
-
-    const counts = new Map();
-    for (const entry of entries || []) {
-        if (!entry?.id) continue;
-        counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+    // Models asked for "just the new part" occasionally answer with the whole
+    // document instead, and appending that silently duplicates history. It is
+    // caught by comparing against the last block already stored: a re-send repeats
+    // it almost word for word, while a genuine continuation shares only names and
+    // places.
+    const blocks = recordBlocks(before);
+    const tail = (blocks[blocks.length - 1] || '').toLowerCase();
+    const tailWords = new Set(tail.split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 3));
+    const haystack = extra.toLowerCase();
+    let hits = 0;
+    for (const word of tailWords) {
+        if (haystack.includes(word)) hits++;
     }
-
-    const missing = expected.filter(id => !counts.has(id));
-    const duplicated = [...counts.entries()].filter(([, n]) => n > 1).map(([id]) => id);
-    const extra = [...counts.keys()].filter(id => !expected.includes(id));
+    const duplicated = tailWords.size >= 5 && hits / tailWords.size >= 0.7;
 
     return {
-        checked: true,
-        ok: !missing.length && !duplicated.length,
-        missing,
+        record: `${before}\n\n${extra}`,
         duplicated,
-        extra,
-        ratio: (expected.length - missing.length) / expected.length,
+        added: recordBlocks(extra).length || 1,
     };
 }
 
-/**
- * Read the archive back after a hand edit in the archive panel.
- *
- * The panel is plain text, one `[timestamp] line` per row, so a line that
- * carries a bracketed stamp is split into its two parts and anything else is
- * kept as an undated line rather than discarded. Order is preserved: the panel
- * is a record of what was written, not a proposal to re-sort.
- */
-export function parseArchiveText(text) {
-    const entries = [];
-    for (const raw of String(text ?? '').split('\n')) {
-        const line = raw.trim();
-        if (!line) continue;
-
-        const m = line.match(/^\[\s*([^\]]{1,64}?)\s*\]\s*(.+)$/);
-        if (m) {
-            entries.push({ ts: m[1].trim(), text: m[2].trim() });
-            continue;
-        }
-        entries.push({ ts: '', text: line });
-    }
-    return entries;
-}
-
-/**
- * Decide whether a chronicle response is trustworthy enough to commit.
- * Guards against the model refusing, rambling, or emitting prose without
- * timestamps — in any of those cases the watermark must not move.
- */
-export function validateChronicleResponse({ entries, datedCount, totalNonEmpty }, expectedMessages) {
-    const expected = Math.max(1, expectedMessages || 1);
-    const problems = [];
-
-    if (!entries.length) {
-        return { ok: false, problems: ['no usable lines parsed'] };
-    }
-    if (!datedCount) {
-        problems.push('no line carried a timestamp');
-    }
-
-    const datedRatio = datedCount / Math.max(1, totalNonEmpty);
-    if (datedRatio < 0.5) {
-        problems.push(`only ${Math.round(datedRatio * 100)}% of lines had timestamps`);
-    }
-
-    const coverage = entries.length / expected;
-    if (coverage < 0.4) {
-        problems.push(`only ${entries.length} lines for ${expected} messages (${Math.round(coverage * 100)}%)`);
-    }
-    if (coverage > 1.5) {
-        problems.push(`${entries.length} lines for ${expected} messages — possible duplication`);
-    }
-
-    return { ok: problems.length === 0, problems };
+/** What the status panel needs to say about the record. */
+export function recordStats(record) {
+    const text = String(record ?? '').trim();
+    const blocks = recordBlocks(text);
+    return {
+        blocks: blocks.length,
+        words: text ? text.split(/\s+/).length : 0,
+        tokens: estimateTokens(text),
+    };
 }
 
 /**
@@ -250,70 +170,6 @@ export function fitArchiveToBudget(lines, budgetTokens) {
 
     kept.reverse();
     return { lines: kept, dropped, used };
-}
-
-/**
- * Select the archive lines most worth including in a structured summary.
- * Scores by overlap with recent text, favours recency, and always keeps the
- * newest lines so the live edge of the story is never starved.
- */
-export function selectRelevantArchive(lines, recentText, { budgetTokens, headroom = 0.6 } = {}) {
-    const list = Array.isArray(lines) ? lines : [];
-    if (!list.length) return { lines: [], dropped: 0, used: 0 };
-
-    const budget = Math.max(0, budgetTokens) * Math.max(0.1, Math.min(1, headroom));
-    if (!budget) return { lines: [], dropped: list.length, used: 0 };
-
-    // Every word the model used in its own prompt is evidence of what it cares
-    // about right now, so the first tokens are kept as well as the long ones.
-    const words = String(recentText || '')
-        .toLowerCase()
-        .split(/[^\p{L}\p{N}_']+/u)
-        .filter(Boolean);
-    const terms = new Set(words.filter(t => t.length > 2));
-
-    const scored = list.map((entry, i) => {
-        const hay = `${entry.ts} ${entry.text}`.toLowerCase();
-        let score = 0;
-        for (const term of terms) {
-            if (hay.includes(term)) score += term.length > 6 ? 2 : 1;
-        }
-        // Relevance dominates recency: a line the model just talked about is
-        // worth more than a merely recent one. Recency only breaks ties.
-        const recency = (i / Math.max(1, list.length - 1)) * 6;
-        return { entry, i, score: score * 10 + recency };
-    });
-
-    // Always retain the newest tail, then fill the remaining budget by score.
-    // The tail is capped by the budget too, so a huge or verbose tail can never
-    // starve out the high-scoring older lines.
-    const tailCount = Math.max(1, Math.floor(list.length * 0.25));
-    const chosen = new Set();
-    let used = 0;
-    let tailUsed = 0;
-    const tailCap = budget * 0.4;
-
-    for (let i = list.length - tailCount; i < list.length; i++) {
-        const cost = estimateTokens(list[i].text);
-        if (tailUsed + cost > tailCap) break;
-        tailUsed += cost;
-        chosen.add(i);
-        used += cost;
-    }
-
-    const candidates = scored
-        .filter(s => !chosen.has(s.i))
-        .sort((a, b) => b.score - a.score);
-
-    for (const c of candidates) {
-        const cost = estimateTokens(c.entry.text);
-        if (used + cost > budget) continue;
-        chosen.add(c.i);
-        used += cost;
-    }
-
-    const kept = [...chosen].sort((a, b) => a - b).map(i => list[i]);
-    return { lines: kept, dropped: list.length - kept.length, used };
 }
 
 /**
@@ -457,36 +313,6 @@ export function repairedText(msg) {
     if (!msg) return '';
     if (msg[ORIGINAL_MES_KEY] === undefined) return msg.mes ?? '';
     return String(msg.mes ?? '').trim() === PLACEHOLDER ? msg[ORIGINAL_MES_KEY] : msg.mes;
-}
-
-/**
- * Where a set of record lines disagrees with itself about time.
- *
- * The archive is appended in the order the messages happened and is never
- * re-sorted: a model that invents a clock, resets a day counter or copies one
- * line out of order would otherwise silently reorder the whole history of the
- * chat, which is worse than an approximate stamp. The breaks are reported so the
- * cause is visible in the log instead of showing up as a story that jumps around.
- */
-export function chronologyBreaks(entries, previous = null) {
-    const list = Array.isArray(entries) ? entries.filter(e => e && e.ts) : [];
-    const breaks = [];
-    let last = previous && previous.ts ? previous : null;
-
-    for (let i = 0; i < list.length; i++) {
-        const entry = list[i];
-        const value = timestampValue(entry.ts);
-        if (!Number.isFinite(value)) continue;
-        if (last) {
-            const previousValue = timestampValue(last.ts);
-            if (Number.isFinite(previousValue) && value < previousValue) {
-                breaks.push({ index: i, from: last.ts, to: entry.ts });
-            }
-        }
-        last = entry;
-    }
-
-    return breaks;
 }
 
 /**
@@ -853,53 +679,7 @@ const DAY_LABEL_RE = /\bday\s*\d+\b/i;
 const MONTH_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
 const YEAR_RE = /\b(19|20)\d{2}\b/;
 
-/**
- * A label counts as a timestamp when it carries a clock time, a day number or a
- * real calendar date. Real roleplay headers produce things like
- * "July 12, 2025 1:15 PM", so the parser must not insist on a rigid pattern.
- */
-export function isTimestampLabel(text) {
-    if (!text) return false;
-    const s = String(text);
-    if (TIME_RE.test(s)) return true;
-    if (DAY_LABEL_RE.test(s)) return true;
-    if (MONTH_RE.test(s) && YEAR_RE.test(s)) return true;
-    return YEAR_RE.test(s);
-}
-
 /** Parse a timestamp label into a sortable value. Unparseable labels sort last. */
-export function timestampValue(ts) {
-    if (!ts) return Infinity;
-    const s = String(ts);
-
-    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
-    const monthMatch = s.match(MONTH_RE);
-    const dayMatch = s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b(?=[,\s])/);
-    const yearMatch = s.match(YEAR_RE);
-    const timeMatch = s.match(TIME_RE);
-    const dayLabel = s.match(DAY_LABEL_RE);
-
-    const hasCalendar = Boolean(monthMatch || yearMatch);
-    if (!hasCalendar && !dayLabel && !timeMatch) return Infinity;
-
-    let month = 0;
-    if (monthMatch) month = months[monthMatch[1].slice(0, 3).toLowerCase()] ?? 0;
-
-    const day = dayMatch ? Number(dayMatch[1]) : (dayLabel ? Number(dayLabel[0].replace(/\D/g, '')) : 1);
-    const year = yearMatch ? Number(yearMatch[0]) : 2000;
-
-    let hours = 0;
-    let minutes = 0;
-    if (timeMatch) {
-        hours = Number(timeMatch[1]);
-        minutes = Number(timeMatch[2]);
-        if (/pm/i.test(timeMatch[3] || '') && hours < 12) hours += 12;
-        if (/am/i.test(timeMatch[3] || '') && hours === 12) hours = 0;
-    }
-
-    return year * 31536000 + month * 2592000 + day * 86400 + hours * 3600 + minutes * 60;
-}
-
 /** Keep the N most recently touched chat states and drop the rest. */
 export function pruneChatStates(states, limit) {
     const map = (states && typeof states === 'object') ? states : {};
@@ -1066,8 +846,9 @@ export function shouldDetectHeaders(messages) {
  * which has no request before it, is marked as such instead of looking like a
  * reply to nothing. The index is also what the record has to bring back.
  */
-export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true, startIndex = 0 } = {}) {
+export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true, startIndex = 0, title = '' } = {}) {
     const list = (messages || []).filter(m => m && !m.is_system);
+    const chatTitle = String(title || '').trim().toLowerCase();
     let exchange = 0;
     let awaitingReply = false;
 
@@ -1081,7 +862,15 @@ export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders
         const role = isUser ? 'user' : (exchange === 0 ? 'opening' : (awaitingReply ? 'reply' : 'extra'));
         if (!isUser) awaitingReply = false;
 
-        const name = m.name ? ` (${m.name})` : '';
+        // The speaker is named, never "User" or "Assistant": those labels end up
+        // copied into the record. A group chat that titles its messages with the
+        // chat name is not a speaker either.
+        const name = String(m.name || '').trim();
+        const isTitle = chatTitle && name.toLowerCase() === chatTitle;
+        const speaker = m.extra?.type === 'narrator'
+            ? 'Narrator'
+            : (isTitle ? (isUser ? 'The user' : 'The character') : (name || (isUser ? 'The user' : 'The character')));
+
         const parsed = useHeaders ? parseMessageHeader(m.mes) : { found: false, meta: {}, body: m.mes };
         const { text } = truncateForPrompt(parsed.body, maxChars);
 
@@ -1091,7 +880,7 @@ export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders
         if (parsed.meta.location) bits.push(parsed.meta.location);
         const head = bits.length ? `${bits.join(' | ')} |` : '';
 
-        return `[#${startIndex + i} · exchange ${exchange} · ${role}]${head ? ' ' + head : ''}\n${isUser ? 'User' : 'Assistant'}${name}: ${text}`;
+        return `[#${startIndex + i} · exchange ${exchange} · ${role}]${head ? ' ' + head : ''}\n${speaker}: ${text}`;
     }).join('\n\n');
 }
 

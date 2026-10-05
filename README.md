@@ -6,16 +6,21 @@ readable while the model receives a compressed version of it.
 
 Two documents replace the raw history:
 
-- **Chronological archive** — one short line per message: what was said and
-  done. Facts only, no interpretation.
-- **Current Summary** — the fifth source of truth. The model already receives the
-  character card, the chronological record and the last exchanges in full, so the
-  summary carries only what none of them does: the decisive events and what they
-  changed, who these characters turned out to be in this story (as opposed to on
-  the card), how the relationships actually work and what shifted them, who knows
-  and hides what, and everything still in play. Sections: Core Memories, Key
+- **The Record** — a chronology the model writes, in blocks of time. It works
+  out the times from the text: real `Date`/`Time` headers from your template when
+  there are any, plausible stretches of the day when there are not, and it says so
+  when a time is approximate. It groups by scene rather than by message, keeps
+  what carries the story and lets the rest go, and never rewrites or reorders
+  history. When it grows past its budget the model condenses the whole document
+  itself, keeping the turning points and the time blocks.
+- **Current Summary** — the story bible. The model already receives the
+  character card, the record and the last exchanges in full, so the summary
+  carries only what none of them does: the decisive events and what they
+  changed, who these characters turned out to be in this story, how the
+  relationships actually work and what shifted them, where the power sits, who
+  knows and hides what, and everything still in play. Sections: Core Memories, Key
   Events & Consequences, Character Truths, Relationship Dynamics, Secrets &
-  Knowledge, Open Threads, Motifs & References. Both panels are hand-editable.
+  Knowledge, Open Threads, Motifs & References. Both documents are hand-editable.
 
 The split is what makes it cheap: neither document repeats the other, so no
 context is paid for twice.
@@ -34,38 +39,39 @@ SillyTavern.
 
 ## How it works
 
-1. **Archive.** Everything older than the raw tail is sent to the model in
-   batches and validated before it is committed. Every message arrives numbered
-   and labelled with the exchange it belongs to (`[#42 · exchange 21 · reply]`),
-   so the model can see which reply answers which request, and the opening
-   message is marked as the one with no request before it. The record has to bring
-   every one of those numbers back: a batch that drops more than a fifth of its
-   messages is rejected rather than committed, because a message the record skips
-   is lost from the prompt and the record at once. A refusal, prose without
-    timestamps or a missing index holds the watermark where it is.
+1. **Record.** Everything older than the raw tail is sent to the model in
+   batches. Every message arrives numbered and labelled with the exchange it
+   belongs to (`[#42 · exchange 21 · reply]`), so the model can see which reply
+   answers which request, and the opening message is marked as the one with no
+   request before it. What comes back is appended to the record as new time
+   blocks, written in the model's own words.
 
-    Messages are timestamped from the real Date/Time/Location header of your
-    template, in either the `Key: value` or the markdown-table form. An embedded
-    chat inside a message is recorded by what was said in it, never by the act of
-    typing. With no header at all the record carries `[Day N]` and is told to
-    invent no clock: an invented time reorders the real chronology. The record is
-    appended in message order and never re-sorted — a clock the model wrote is
-    never allowed to rearrange history — and any line that goes backwards is
-    reported in the log.
+   There is no line format and nothing is parsed or rejected afterwards. That is
+   deliberate: when the record was one line per message, it became a compressed
+   transcript — a sentence for every gesture, and almost never a key event. The
+   model is asked instead to group by scene, keep what carries the story, and let
+   the rest go, in whatever shape reads best.
+
+   Times are the model's to work out: real Date/Time/Location headers from your
+   template when the messages carry them, plausible stretches of the day when they
+   do not, approximate where it must guess. An embedded conversation inside a
+   message is written down by what was said in it, never by the act of typing.
+   Nothing ever reorders the record, and a whole document sent back by mistake is
+   caught in the log rather than appended twice.
 2. **Exclude.** Absorbed messages are marked with SillyTavern's own
    `is_system` flag — the same one its *Exclude message from prompts* button
    uses. The prompt builder drops them, the chat keeps them in full, and any
    single message can be un-hidden by hand with the eye button.
-3. **Summary.** The existing summary, the new archive lines and the live edge of
-   the story are merged into a revised summary. This is the largest request the
+3. **Story bible.** The existing summary, the new record blocks and the live edge
+   of the story are merged into a revised summary. This is the largest request the
    extension makes, so it is fitted to the context window *after* the
    instructions have taken their share, and if the backend still says the input
    is too long the material is halved and the request is rebuilt rather than
    repeated unchanged. A revision that comes back a fraction of the length of the
    summary it replaces is treated as a failure: the old summary is kept, because
-   a stub would throw away everything the archive preserves.
+   a stub would throw away everything the record preserves.
 4. **Lorebook.** Optional pass that extracts permanent world facts from the
-   archive.
+   record, walked block by block.
 5. **Inject.** Before the history: the emotional anchors and the archive. After
    the history: key events, who these characters are, how the relationships work,
    secrets and knowledge, and what is still in play. Everything is bounded by the
@@ -77,7 +83,7 @@ SillyTavern.
 | --- | --- |
 | Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. This is the biggest lever on how hard the chat compresses. |
 | Everything injected, hard ceiling | The one number that decides the size of every request. The durable story memory is kept first, the world facts are sacrificed first. |
-| Archive when N unarchived messages accumulate | The auto-trigger for a run. |
+| Record when N unrecorded messages accumulate | The auto-trigger for a run. |
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
 | Give up on one request after | Wall-clock limit for a single request. A request still running after this is cut off, reported and retried instead of hanging the run. 0 removes the limit. |
@@ -85,9 +91,9 @@ SillyTavern.
 | My requests: temperature / top p | One setting for both stages, 0.6 and 0.8 by default. Both stages restate material in a fixed format, so they sample the same way; top p 1 lets the model reach any token in the tail, which is where stray fragments come from. |
 | Message headers | Auto-detect reads Date/Time/Location in either `Key: value` or markdown-table form. Turn it on if your template carries them and detection still says no. |
 | Retry attempts / Delay between retries | How often a failed or empty request is retried, and how long the pause is. The status line counts the pause down. |
-| View Current Summary / View Archive | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
-| Reset & Re-absorb | Discards the archive, summary and lorebook, releases every message, and re-archives from scratch. |
-| Rollback Summary | Restores the previous summary and releases the messages absorbed after it. |
+| View Story Bible / View Record | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
+| Reset & Re-absorb | Discards the record, the story bible and the lorebook, releases every message, and starts recording from scratch. |
+| Rollback Summary | Restores the previous story bible and the record, and releases the messages recorded after it. |
 
 Slash commands: `/summarize`, `/clearsummary`, `/buildlorebook`, `/stop`,
 `/chronicle <search>`, `/lorebook <search>`.

@@ -4,13 +4,9 @@ import { readFile } from 'node:fs/promises';
 
 import {
     estimateTokens,
-    parseChronicleBlock,
-    parseArchiveText,
-    validateChronicleResponse,
     computeArchiveRange,
     chunk,
     fitArchiveToBudget,
-    selectRelevantArchive,
     parseLorebookResponse,
     lorebookKey,
     mergeLorebook,
@@ -26,31 +22,29 @@ import {
     fitStage2Budgets,
     looksTruncatedRevision,
     markAbsorbed,
-    chronologyBreaks,
     reconcileWatermark,
-    timestampValue,
     truncateForPrompt,
     formatMessages,
     perMessageCharLimit,
     pruneChatStates,
     chatStateKey,
-    isTimestampLabel,
     computeTokenStats,
     formatTokens,
     countCoreMemories,
     looksLikeRefusal,
-    stripEmphasis,
     parseMessageHeader,
     metaStamp,
     shouldDetectHeaders,
     formatMessagesForArchive,
-    verifyChronicleCoverage,
     stripHeaders,
     countExchanges,
     SUMMARIZED_FLAG,
     ORIGINAL_MES_KEY,
     HIDDEN_FLAG,
     PLACEHOLDER,
+    recordBlocks,
+    appendRecord,
+    recordStats,
 } from '../core.js';
 
 test('index.js declares its defaults before anything references them', async () => {
@@ -150,107 +144,6 @@ test('estimateTokens scales with length and handles empties', () => {
     assert.equal(estimateTokens('a'.repeat(40)), 10);
 });
 
-test('parseChronicleBlock reads timestamps and bodies', () => {    const text = [
-        '[Day 1 09:12] Varen crossed the yard. Serath watched.',
-        '[Day 1 09:15] Serath said nothing.',
-        '[09:20] A door closed.',
-    ].join('\n');
-
-    const { entries, datedCount, totalNonEmpty } = parseChronicleBlock(text);
-    assert.equal(totalNonEmpty, 3);
-    assert.equal(datedCount, 3);
-    assert.equal(entries.length, 3);
-    assert.equal(entries[0].ts, 'Day 1 09:12');
-    assert.match(entries[0].text, /Varen crossed/);
-    assert.equal(entries[2].ts, '09:20');
-});
-
-test('parseChronicleBlock survives markdown emphasis around the label', () => {
-    // Models very often bold the timestamp; it must still be recognised.
-    const variants = [
-        '**Day 1 09:12** Varen crossed the yard.',
-        '**[Day 1 09:12]** Varen crossed the yard.',
-        '### Day 1 09:12 - Varen crossed the yard.',
-        '_Day 1 09:12_ Varen crossed the yard.',
-        '`Day 1 09:12` Varen crossed the yard.',
-    ];
-    for (const v of variants) {
-        const r = parseChronicleBlock(v);
-        assert.equal(r.datedCount, 1, `failed on: ${v}`);
-        assert.equal(r.entries[0].ts, 'Day 1 09:12', `failed on: ${v}`);
-        assert.match(r.entries[0].text, /Varen crossed/);
-    }
-});
-
-test('parseChronicleBlock drops preamble and code fences', () => {
-    const text = [
-        'Here is the chronological record:',
-        '```',
-        '[Day 1 09:12] Something happened.',
-        '```',
-        '=== END ===',
-    ].join('\n');
-
-    const { entries, datedCount } = parseChronicleBlock(text);
-    assert.equal(datedCount, 1);
-    assert.equal(entries.length, 1);
-});
-
-test('parseChronicleBlock rejects undated lines by default', () => {
-    const text = 'They spoke for a long time about nothing in particular.';
-    const strict = parseChronicleBlock(text);
-    assert.equal(strict.entries.length, 0);
-    assert.equal(strict.totalNonEmpty, 1);
-
-    const lenient = parseChronicleBlock(text, { allowUndated: true });
-    assert.equal(lenient.entries.length, 1);
-});
-
-test('validateChronicleResponse accepts a well formed record', () => {
-    const text = Array.from({ length: 5 }, (_, i) => `[Day 1 09:${10 + i}] Event number ${i} happened.`).join('\n');
-    const parsed = parseChronicleBlock(text);
-    const result = validateChronicleResponse(parsed, 5);
-    assert.equal(result.ok, true, result.problems.join('; '));
-});
-
-test('validateChronicleResponse refuses a refusal with no lines', () => {
-    const parsed = parseChronicleBlock("I'm sorry, I can't help with that.");
-    const result = validateChronicleResponse(parsed, 10);
-    assert.equal(result.ok, false);
-    assert.match(result.problems.join(' '), /no usable lines/);
-});
-
-test('validateChronicleResponse refuses prose without timestamps', () => {
-    const text = 'Varen walked in. He was wet from the rain. Serath looked up.';
-
-    // Strict parsing drops the undated lines, so the run looks empty.
-    const strict = validateChronicleResponse(parseChronicleBlock(text), 3);
-    assert.equal(strict.ok, false);
-    assert.match(strict.problems.join(' '), /no usable lines parsed/);
-
-    // Lenient parsing keeps them, and the missing timestamps are named.
-    const lenient = validateChronicleResponse(parseChronicleBlock(text, { allowUndated: true }), 3);
-    assert.equal(lenient.ok, false);
-    assert.match(lenient.problems.join(' '), /no line carried a timestamp/);
-});
-
-test('validateChronicleResponse refuses severe under-coverage', () => {
-    const text = '[Day 1 09:00] One line only.';
-    const parsed = parseChronicleBlock(text);
-    const result = validateChronicleResponse(parsed, 40);
-    assert.equal(result.ok, false);
-    assert.match(result.problems.join(' '), /for 40 messages/);
-});
-
-test('validateChronicleResponse flags duplication', () => {
-    const lines = [];
-    for (let i = 0; i < 20; i++) lines.push(`[Day 1 09:${String(i % 60).padStart(2, '0')}] Repeated line ${i}.`);
-    const parsed = parseChronicleBlock(lines.join('\n'));
-    const result = validateChronicleResponse(parsed, 5);
-    assert.equal(result.ok, false);
-    assert.match(result.problems.join(' '), /possible duplication/);
-});
-
 test('computeArchiveRange excludes the raw tail and respects the watermark', () => {
     const r = computeArchiveRange({ chatLength: 30, watermark: -1, keepLast: 10 });
     assert.deepEqual(r, { start: 0, end: 19 });
@@ -285,31 +178,6 @@ test('fitArchiveToBudget keeps the newest lines and reports drops', () => {
 test('fitArchiveToBudget handles a zero budget', () => {
     const lines = [{ ts: '', text: 'something' }];
     const { lines: kept, dropped } = fitArchiveToBudget(lines, 0);
-    assert.equal(kept.length, 0);
-    assert.equal(dropped, 1);
-});
-
-test('selectRelevantArchive always keeps the newest tail', () => {
-    const lines = Array.from({ length: 40 }, (_, i) => ({ ts: '', text: `event ${i}` }));
-    const { lines: kept } = selectRelevantArchive(lines, '', { budgetTokens: 40 });
-    assert.ok(kept.length > 0);
-    assert.equal(kept[kept.length - 1].text, 'event 39');
-});
-
-test('selectRelevantArchive favours lines matching the recent text', () => {
-    const lines = [
-        { ts: '', text: 'They discussed the weather at length.' },
-        { ts: '', text: 'Varen confessed the Keld betrayal to Serath privately.' },
-        { ts: '', text: 'More small talk about nothing.' },
-        { ts: '', text: 'Varen and Serath discussed the weather again.' },
-    ];
-    const { lines: kept } = selectRelevantArchive(lines, 'the Keld betrayal', { budgetTokens: 60 });
-    assert.ok(kept.some(l => l.text.includes('Keld betrayal')));
-});
-
-test('selectRelevantArchive returns everything dropped on a tiny budget', () => {
-    const lines = [{ ts: '', text: 'a'.repeat(400) }];
-    const { lines: kept, dropped } = selectRelevantArchive(lines, '', { budgetTokens: 0 });
     assert.equal(kept.length, 0);
     assert.equal(dropped, 1);
 });
@@ -471,27 +339,6 @@ test('a message with nothing to repair comes back unchanged', () => {
     assert.equal(repairedText(null), '');
 });
 
-test('a hand-edited archive keeps its stamps and its order', () => {
-    const entries = parseArchiveText([
-        '[July 12, 2025 1:15 PM] Rebecca stood at the railing.',
-        '',
-        'A line the user typed without a stamp.',
-        '[July 11, 2025 11:00 PM] They had left the harbour.',
-    ].join('\n'));
-
-    assert.equal(entries.length, 3);
-    assert.equal(entries[0].ts, 'July 12, 2025 1:15 PM');
-    assert.equal(entries[1].ts, '', 'an unstamped line is kept, not dropped');
-    assert.equal(entries[2].ts, 'July 11, 2025 11:00 PM', 'the order the user wrote is the order kept');
-});
-
-test('an empty archive panel parses to nothing rather than to a broken line', () => {
-    assert.deepEqual(parseArchiveText(''), []);
-    assert.deepEqual(parseArchiveText('   \n\n  '), []);
-    assert.deepEqual(parseArchiveText(null), []);
-    assert.deepEqual(parseArchiveText('[]'), [{ ts: '', text: '[]' }], 'a stamp with no body is just text');
-});
-
 test('a leaked reasoning block never reaches the summary or the archive', () => {
     const raw = [
         '<think>The user wants a record of the harbour scene. I should keep it factual.</think>',
@@ -539,18 +386,6 @@ test('markAbsorbed leaves already flagged messages alone', () => {
     const marked = markAbsorbed(chat, 0, 0);
     assert.equal(marked[0].mes, 'a');
     assert.equal(marked[0][SUMMARIZED_FLAG], true);
-});
-
-test('selectRelevantArchive does not starve on a huge tail', () => {
-    // The newest 25% is retained unconditionally, so an enormous tail must not
-    // silently consume the whole budget and empty out the selection.
-    const lines = [{ ts: '', text: 'old relevant line about the Keld betrayal' }];
-    const hugeTail = Array.from({ length: 500 }, (_, i) => ({ ts: '', text: 'x'.repeat(200) }));
-    const { lines: kept } = selectRelevantArchive([...lines, ...hugeTail], 'the Keld betrayal', {
-        budgetTokens: 1000,
-    });
-    assert.ok(kept.length > 0);
-    assert.ok(kept.some(l => l.text.includes('Keld betrayal')));
 });
 
 test('the watermark is re-derived from the flags when nothing is missing', () => {
@@ -681,61 +516,6 @@ test('perMessageCharLimit respects the floor and ceiling', () => {
     assert.equal(perMessageCharLimit(10_000_000, 2), 4000);
 });
 
-test('timestampValue parses day and time forms', () => {
-    // Absolute values carry a year base now, so only their order is asserted.
-    const dayForm = timestampValue('Day 1 09:00');
-    const bareTime = timestampValue('09:30');
-    assert.ok(Number.isFinite(dayForm));
-    assert.ok(Number.isFinite(bareTime));
-    assert.ok(bareTime > dayForm, 'a later clock time must sort later');
-    assert.ok(timestampValue('') > Number.MAX_SAFE_INTEGER, 'missing label sorts last');
-    assert.ok(Number.isFinite(timestampValue('2025-07-12 09:20')));
-});
-
-test('the record is never re-sorted, only checked for time going backwards', () => {
-    // Sorting the record by a clock the model wrote reorders real history
-    // whenever it invents, resets or copies a time wrong. Appending in message
-    // order is the only order that is always right, so a disagreement is
-    // reported rather than acted on.
-    const forward = chronologyBreaks([
-        { ts: 'October 24, 2026 08:38 PM', text: 'first' },
-        { ts: 'October 24, 2026 08:41 PM', text: 'second' },
-        { ts: 'October 25, 2026 09:02 AM', text: 'third' },
-    ]);
-    assert.deepEqual(forward, [], 'a record that moves forward has no breaks');
-
-    const backwards = chronologyBreaks([
-        { ts: 'October 25, 2026 09:02 AM', text: 'later' },
-        { ts: 'October 24, 2026 08:38 PM', text: 'earlier' },
-    ]);
-    assert.equal(backwards.length, 1);
-    assert.equal(backwards[0].from, 'October 25, 2026 09:02 AM');
-    assert.equal(backwards[0].to, 'October 24, 2026 08:38 PM');
-
-    // A day counter the model restarted, which used to be the worst case.
-    const reset = chronologyBreaks([
-        { ts: 'Day 4 21:00', text: 'late on day four' },
-        { ts: 'Day 1 09:00', text: 'back to the morning' },
-    ]);
-    assert.equal(reset.length, 1, 'a restarted day counter is exactly what must be reported');
-
-    // Undated lines and unparseable labels are not breaks.
-    assert.deepEqual(chronologyBreaks([{ ts: '', text: 'no stamp' }, { ts: '??', text: 'junk' }]), []);
-    assert.deepEqual(chronologyBreaks(null), []);
-
-    // The check continues from the line already in the record, so a batch that
-    // starts later than the last line of the previous one is fine.
-    const acrossBatches = chronologyBreaks(
-        [{ ts: 'Day 2 10:00', text: 'first' }],
-        { ts: 'Day 1 08:00', text: 'the previous batch ended here' });
-    assert.deepEqual(acrossBatches, []);
-
-    const batchWentBack = chronologyBreaks(
-        [{ ts: 'Day 1 08:00', text: 'first' }],
-        { ts: 'Day 2 10:00', text: 'the previous batch ended here' });
-    assert.equal(batchWentBack.length, 1, 'a new batch that starts earlier than the last line is a break');
-});
-
 test('pruneChatStates keeps the most recently touched states', () => {
     const states = {
         a: { touchedAt: 100 },
@@ -760,12 +540,6 @@ test('chatStateKey separates group chats from solo chats', () => {
     assert.notEqual(chatStateKey(3, 'group'), chatStateKey(3, 'solo'));
     assert.equal(chatStateKey(null, 'solo'), null);
     assert.equal(chatStateKey('', 'solo'), null);
-});
-
-test('stripEmphasis removes markdown markers but keeps the text', () => {
-    assert.equal(stripEmphasis('**[Day 1 09:12]** Varen left.'), '[Day 1 09:12] Varen left.');
-    assert.equal(stripEmphasis('### Day 1 09:12 - Varen left.'), 'Day 1 09:12 - Varen left.');
-    assert.equal(stripEmphasis('  `Day 1 09:12`  '), 'Day 1 09:12');
 });
 
 test('parseMessageHeader reads a full roleplay header', () => {
@@ -835,81 +609,44 @@ test('shouldDetectHeaders ignores system messages and tiny chats', () => {
 
 test('formatMessagesForArchive hands the model real stamps and places', () => {
     const msgs = [
-        { is_user: true, mes: 'Where are we going?' },
+        { is_user: true, name: 'Sergey', mes: 'Where are we going?' },
         {
             is_user: false,
+            name: 'Julia',
             mes: 'Date: July 13, 2025\nTime: 8:31 AM\nLocation: Front porch\n\nRebecca leaned on the rail.',
         },
     ];
     const out = formatMessagesForArchive(msgs, { useHeaders: true });
     assert.match(out, /\[#0 · exchange 1 · user\]/);
-    assert.match(out, /User: Where are we going\?/);
+    // Speakers are named, never "User"/"Assistant": those words end up copied
+    // into the record itself.
+    assert.match(out, /Sergey: Where are we going\?/);
     assert.match(out, /\[#1 · exchange 1 · reply\] July 13, 2025 8:31 AM \| Front porch/);
+    assert.match(out, /Julia: Rebecca leaned on the rail/);
+    assert.ok(!/\bUser:/.test(out), 'the word "User" must never appear as a speaker');
+    assert.ok(!/\bAssistant/.test(out), 'nor "Assistant"');
     assert.ok(!out.includes('Weather:'), 'the header itself must not be repeated in the body');
-    assert.match(out, /Rebecca leaned on the rail/);
 });
 
-test('formatMessagesForArchive indexes the exchange each message belongs to', () => {
-    // The model has to see which reply answers which request, and the opening
-    // message has no request before it and must not look like a reply.
+test('a message titled with the chat name is not presented as a speaker', () => {
+    // A group chat that titled a message with the chat's own name produced lines
+    // like "Assistant (My Chat) described Ruby climbing the ladder".
     const out = formatMessagesForArchive([
-        { is_user: false, mes: 'The rain had stopped by the time she reached the pier.' },
-        { is_user: true, mes: 'You came.' },
-        { is_user: false, mes: 'I said I would.' },
-        { is_user: true, mes: 'Then sit.' },
-        { is_user: false, mes: 'He sat.' },
-    ], { useHeaders: false, startIndex: 40 });
+        { is_user: false, name: 'Someone Is In Your Room', mes: 'Ruby climbed the ladder.' },
+        { is_user: false, extra: { type: 'narrator' }, mes: 'The rain had stopped by then.' },
+        { is_user: false, mes: 'No name at all.' },
+    ], { useHeaders: false, title: 'Someone Is In Your Room' });
 
-    assert.match(out, /\[#40 · exchange 0 · opening\]/);
-    assert.match(out, /\[#41 · exchange 1 · user\]/);
-    assert.match(out, /\[#42 · exchange 1 · reply\]/);
-    assert.match(out, /\[#43 · exchange 2 · user\]/);
-    assert.match(out, /\[#44 · exchange 2 · reply\]/);
-    assert.equal((out.match(/opening/g) || []).length, 1, 'only the first message opens the conversation');
-});
-
-test('the record can prove it covered every message it was given', () => {
-    // Counting lines cannot tell a merged pair from a dropped one. The indices
-    // can, and they name the message that went missing.
-    const text = [
-        '[July 13, 2025 8:31 AM] [#40] Name arrived at the pier.',
-        '[July 13, 2025 8:33 AM] [#42] Name answered that she had waited.',
-    ].join('\n');
-
-    const parsed = parseChronicleBlock(text);
-    assert.equal(parsed.entries[0].id, '40');
-    assert.equal(parsed.entries[1].id, '42');
-
-    const gap = verifyChronicleCoverage(parsed.entries, ['40', '41', '42']);
-    assert.equal(gap.checked, true);
-    assert.equal(gap.ok, false);
-    assert.deepEqual(gap.missing, ['41'], 'the missing index names the lost message');
-    assert.equal(gap.ratio.toFixed(2), '0.67');
-
-    const whole = verifyChronicleCoverage(parsed.entries, ['40', '42']);
-    assert.equal(whole.ok, true);
-    assert.equal(whole.ratio, 1);
-
-    const repeated = verifyChronicleCoverage(parsed.entries.concat([{ ts: '', id: '42', text: 'again' }]), ['40', '42']);
-    assert.equal(repeated.ok, false);
-    assert.deepEqual(repeated.duplicated, ['42']);
-
-    assert.equal(verifyChronicleCoverage(parsed.entries, []).checked, false, 'no input, nothing to check');
-});
-
-test('a record line that keeps its index but loses its stamp is still kept', () => {
-    // Dropping it would hide a gap in the coverage instead of showing it.
-    const parsed = parseChronicleBlock('[#7] Name said something without a timestamp.');
-    assert.equal(parsed.entries.length, 1);
-    assert.equal(parsed.entries[0].id, '7');
-    assert.equal(parsed.entries[0].ts, '');
+    assert.ok(!/Someone Is In Your Room: Ruby climbed/.test(out), 'the chat title is not a speaker');
+    assert.match(out, /The character: Ruby climbed the ladder\./);
+    assert.match(out, /Narrator: The rain had stopped by then\./);
 });
 
 test('formatMessagesForArchive can leave the header inline when disabled', () => {
-    const msgs = [{ is_user: false, mes: 'Date: July 13, 2025\nLocation: Pier\n\nBody.' }];
+    const msgs = [{ is_user: false, name: 'Julia', mes: 'Date: July 13, 2025\nLocation: Pier\n\nBody.' }];
     const out = formatMessagesForArchive(msgs, { useHeaders: false });
     assert.match(out, /\[#0 · exchange 0 · opening\]/);
-    assert.match(out, /Assistant: Date: July 13, 2025/);
+    assert.match(out, /Julia: Date: July 13, 2025/);
 });
 
 test('stripHeaders removes the block but keeps the message intact otherwise', () => {
@@ -947,75 +684,6 @@ test('the extension owns its output limit instead of inheriting the chat one', (
     assert.equal(resolve(-5), null);
     assert.equal(resolve(undefined), null);
     assert.equal(resolve(10), 256, 'a floor keeps a nonsense value from producing nothing');
-});
-
-test('parseChronicleBlock accepts real calendar dates from message headers', () => {
-    // This is the exact shape the archivist produced when given real headers.
-    const text = [
-        '[July 12, 2025 1:15 PM] Rebecca and Ruby stand at the yacht railing.',
-        '[July 12, 2025 1:17 PM] Sergey grabbed Ruby and threw her into the water.',
-        '[July 12, 2025 2:01 PM] Sergey swam over and climbed aboard.',
-    ].join('\n');
-
-    const r = parseChronicleBlock(text);
-    assert.equal(r.entries.length, 3);
-    assert.equal(r.datedCount, 3);
-    assert.equal(r.entries[0].ts, 'July 12, 2025 1:15 PM');
-    assert.match(r.entries[1].text, /Sergey grabbed Ruby/);
-    assert.equal(validateChronicleResponse(r, 3).ok, true);
-});
-
-test('parseChronicleBlock handles a 60 line batch without losing any', () => {
-    const lines = Array.from({ length: 60 }, (_, i) =>
-        `[July 12, 2025 ${1 + Math.floor(i / 30)}:${String(15 + i * 2).padStart(2, '0')} PM] Event ${i} happened.`);
-    const r = parseChronicleBlock(lines.join('\n'));
-    assert.equal(r.entries.length, 60);
-    assert.equal(r.datedCount, 60);
-    const verdict = validateChronicleResponse(r, 60);
-    assert.equal(verdict.ok, true, verdict.problems.join('; '));
-});
-
-test('parseChronicleBlock accepts 12 hour times and dates without a day number', () => {
-    const r = parseChronicleBlock([
-        '[July 12, 2025 1:15 PM] Something happened.',
-        '[March 3, 2024 11:05 PM] Something else happened.',
-    ].join('\n'));
-    assert.equal(r.datedCount, 2);
-    assert.equal(r.entries[1].ts, 'March 3, 2024 11:05 PM');
-});
-
-test('isTimestampLabel separates stamps from prose', () => {
-    assert.equal(isTimestampLabel('July 12, 2025 1:15 PM'), true);
-    assert.equal(isTimestampLabel('Day 3 10:00'), true);
-    assert.equal(isTimestampLabel('10:00'), true);
-    assert.equal(isTimestampLabel('2025-07-12'), true);
-    assert.equal(isTimestampLabel('Rebecca and Ruby stand at the railing'), false);
-    assert.equal(isTimestampLabel('He shouted'), false);
-    assert.equal(isTimestampLabel(''), false);
-});
-
-test('timestampValue orders real dates correctly', () => {
-    const a = timestampValue('July 12, 2025 1:15 PM');
-    const b = timestampValue('July 12, 2025 1:15 AM');
-    const c = timestampValue('July 11, 2025 11:00 PM');
-    assert.ok(a > b, 'PM must sort after AM');
-    assert.ok(c < b, 'the previous day must sort first');
-});
-
-test('full calendar dates in the record are compared, not used to reorder it', () => {
-    const lines = [
-        { ts: 'July 12, 2025 2:01 PM', text: 'second' },
-        { ts: 'July 11, 2025 11:00 PM', text: 'first, an hour earlier' },
-    ];
-    assert.equal(chronologyBreaks(lines).length, 1,
-        'a real date that goes backwards is still a break worth reporting');
-    assert.equal(chronologyBreaks([lines[1], { ...lines[0] }]).length, 0);
-});
-
-test('validateChronicleResponse expects one line per message', () => {
-    const lines = Array.from({ length: 30 }, (_, i) => `[July 12, 2025 1:${String(15 + i).padStart(2, '0')} PM] Line ${i}.`);
-    const r = parseChronicleBlock(lines.join('\n'));
-    assert.equal(validateChronicleResponse(r, 30).ok, true, 'one line per message is correct');
 });
 
 test('the live tail is never excluded', () => {
@@ -1245,9 +913,10 @@ test('the archive and the summary are told to keep different jobs', async () => 
     };
 
     const chronicle = grab('CHRONICLE_PROMPT_TEMPLATE');
-    assert.match(chronicle, /ONE LINE PER MESSAGE/i, 'the record stays one line per message');
-    assert.match(chronicle, /NO feelings/i, 'the record must not carry the emotional layer');
-    assert.match(chronicle, /SUMMARY/i, 'the record must point at the other document');
+    assert.match(chronicle, /It is a record of events, not a transcript/i,
+        'the record must never turn into a per-message transcript');
+    assert.match(chronicle, /Keep what carries the story/i);
+    assert.match(chronicle, /WHAT THE RECORD IS FOR/i);
 
     const summary = grab('SUMMARY_PROMPT_TEMPLATE');
     assert.match(summary, /DIVISION OF LABOUR/i);
@@ -1504,7 +1173,8 @@ test('a reset is written to disk at once, not on the debounce', async () => {
     const critical = [
         ['resetStateForRebuild', /EMPTY_CHAT_STATE/],
         ['reabsorb', /Object\.assign\(state, EMPTY_CHAT_STATE\(\)\)/],
-        ['clear summary', /state\.chronicle = \[\];/],
+        ['clear summary', /state\.record = '';/],
+        ['clear record', /state\.record = '';/],
         ['clear lorebook', /state\.lorebook = \{\};/],
     ];
 
@@ -1640,25 +1310,119 @@ test('both stages share one temperature and one top p', async () => {
     assert.match(src, /id="es_top_p"/, 'the top p is settable');
 });
 
-test('without headers the archivist is told not to invent a clock', async () => {
-    // An invented time is worse than no time: the record is then sorted against
-    // a fiction, and the real chronology is gone.
-    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-    assert.match(src, /you must NOT invent any\. Write \[Day N\]/);
-    assert.match(src, /Never write a clock time, a real date or a location you were not given/);
-    assert.ok(!/Infer a plausible time and advance it by 1-5 minutes/.test(src));
-    // With headers it copies them instead.
-    assert.match(src, /Copy the date, the time and the place exactly as given/);
-});
-
-test('an embedded chat is recorded by its content, not by the act of typing', async () => {
-    // The reported failure: a message containing a text conversation came back as
-    // "the character typed and stopped typing", which describes nothing.
+test('the record is a document the model writes, in blocks it chooses itself', async () => {
+    // The failure this replaces: a line per message became a transcript, so the
+    // record carried a sentence for every gesture and never said what mattered.
     const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const chronicle = src.match(/const CHRONICLE_PROMPT_TEMPLATE = `([\s\S]*?)`;/)[1];
-    assert.match(chronicle, /EMBEDDED exchange/i);
-    assert.match(chronicle, /Never record the act of\s+typing, sending, reading, replying or stopping/i);
-    assert.match(chronicle, /what was said and done in it/i);
+
+    assert.match(chronicle, /Group by scene or by stretch of time rather than by message/);
+    assert.match(chronicle, /Small talk, gestures, weather, food, repeated motions/);
+    assert.match(chronicle, /place\s+events in plausible stretches of the day/i);
+    assert.match(chronicle, /approximate/);
+    assert.match(chronicle, /Output only the new blocks/);
+
+    // The per-message machinery is gone: nothing may force a line per message.
+    assert.ok(!/ONE (OUTPUT )?LINE PER INPUT LINE/i.test(chronicle));
+    assert.ok(!/\[#\d+\]/.test(chronicle), 'no per-message index is demanded any more');
+    assert.ok(!src.includes('verifyChronicleCoverage'), 'no coverage gate remains');
+    assert.ok(!src.includes('validateChronicleResponse'));
+    assert.ok(!src.includes('parseChronicleBlock'));
+    assert.ok(!src.includes('sortArchiveLines'));
+
+    // An embedded conversation is written down by what it said.
+    assert.match(chronicle, /a conversation inside it/i);
+    assert.match(chronicle, /Never write that someone typed, sent or stopped typing/i);
+
+    // The record lives as one text field, not as parsed lines.
+    assert.match(src, /record: '',/);
+    assert.match(src, /state\.record = condensed;/);
+});
+
+test('times are the model\'s to place, and a real header is used when there is one', async () => {
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /Where a message carries a real date and time/);
+    assert.match(src, /The messages carry no timestamps at all, so work every time out of the material itself/);
+    // Nothing may order the record by a clock the model wrote.
+    assert.ok(!/sortArchiveLines|timestampValue\(/.test(src));
+});
+
+test('the record is trimmed by whole blocks, never by splitting one', async () => {
+    // A block without its heading leaves the reader without the time it belongs to.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /recordBlocks\(getRecord\(\)\)/);
+    assert.match(src, /omitted for length/);
+});
+
+test('the record is split on the headings the model wrote', () => {
+    const record = [
+        '## Day 1 — evening, his apartment',
+        '20:40-21:10  Dinner, and the cake from work.',
+        '21:10-21:25  He said he loved her.',
+        '',
+        '## Day 2 — morning',
+        '08:00-08:20  She left before he woke.',
+    ].join('\n');
+
+    const blocks = recordBlocks(record);
+    assert.equal(blocks.length, 2);
+    assert.match(blocks[0], /## Day 1/);
+    assert.match(blocks[0], /Dinner/);
+    assert.match(blocks[1], /## Day 2/);
+    assert.ok(!blocks[1].includes('Dinner'), 'a block keeps only its own material');
+
+    assert.deepEqual(recordBlocks(''), []);
+    assert.deepEqual(recordBlocks(null), []);
+});
+
+test('a record written without headings still comes back in workable pieces', () => {
+    const flat = Array.from({ length: 8 }, (_, i) =>
+        `20:${String(i * 3).padStart(2, '0')} something happened number ${i} and it mattered.`).join('\n\n');
+    // No headings to split on, so the window does it — and nothing may be lost.
+    const blocks = recordBlocks(flat, { targetChars: 200 });
+    assert.ok(blocks.length > 1, 'long flat text has to be cut somewhere');
+    assert.ok(blocks.every(b => b.trim().length > 0));
+    assert.ok(blocks.join(' ').includes('number 7'), 'nothing is lost by the split');
+    // Short enough text is left as one piece rather than shredded.
+    assert.deepEqual(recordBlocks('one short block'), ['one short block']);
+});
+
+test('appending keeps the document whole and spots a re-sent whole record', () => {
+    const first = '## Day 1\n20:00-21:00  He told her about the letter he never sent and she did not answer him at all.';
+    const second = '## Day 2\n08:00-08:10  She took the spare key and left the coffee unwashed in the sink.';
+
+    const one = appendRecord('', first);
+    assert.equal(one.record, first);
+    assert.equal(one.duplicated, false);
+    assert.equal(one.added, 1);
+
+    const two = appendRecord(one.record, second);
+    assert.ok(two.record.startsWith(first));
+    assert.ok(two.record.includes(second));
+    assert.equal(two.duplicated, false, 'a genuine continuation is not a re-send');
+    assert.equal(two.added, 1);
+
+    // The model answering with the entire document instead of the new part is
+    // the one failure mode worth catching: appending it duplicates history.
+    const resent = appendRecord(one.record, `${first}\n\n${second}`);
+    assert.equal(resent.duplicated, true);
+
+    // A continuation that happens to share names and places is still a continuation.
+    const shared = appendRecord(one.record,
+        '## Day 2\n08:00-08:10  The letter was on the table where he had left it and she read every word twice.');
+    assert.equal(shared.duplicated, false);
+
+    assert.equal(appendRecord('something', '').record, 'something');
+    assert.equal(appendRecord('something', '   ').added, 0);
+});
+
+test('record stats say what the panel needs', () => {
+    const record = '## Day 1\n20:00-20:30  A thing happened.\n\n## Day 2\n08:00-08:10  Another thing.';
+    const stats = recordStats(record);
+    assert.equal(stats.blocks, 2);
+    assert.ok(stats.words > 10);
+    assert.equal(stats.tokens, Math.ceil(record.trim().length / 4));
+    assert.deepEqual(recordStats(''), { blocks: 0, words: 0, tokens: 0 });
 });
 
 test('countExchanges counts user turns and never returns zero', () => {

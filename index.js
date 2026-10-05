@@ -12,8 +12,9 @@ import {
     describeEmptyAnswer,
     fitStage2Budgets,
     looksTruncatedRevision,
-    verifyChronicleCoverage,
-    chronologyBreaks,
+    recordBlocks,
+    appendRecord,
+    recordStats,
     reconcileWatermark,
     formatMessages,
     perMessageCharLimit,
@@ -29,15 +30,11 @@ import {
     formatMessagesForArchive,
     stripHeaders,
     estimateTokens,
-    parseChronicleBlock,
-    parseArchiveText,
     stripReasoning,
     repairedText,
     planPromptExclusion,
-    validateChronicleResponse,
     computeArchiveRange,
     fitArchiveToBudget,
-    selectRelevantArchive,
     parseLorebookResponse,
     mergeLorebook,
     shouldAdvanceLorebook,
@@ -87,7 +84,7 @@ const DEFAULT_SETTINGS = {
     customApiKey: '',
     customModel: '',
     customApiType: 'openai',
-    chronicleBatchSize: 30,
+    recordBatchSize: 30,
     lorebookBatchSize: 40,
     lorebookMaxBatches: 8,
     recentAnswerCount: 30,
@@ -97,9 +94,9 @@ const DEFAULT_SETTINGS = {
     injectSummaryTokens: 4000,
     injectLorebookTokens: 2000,
     injectTotalTokens: 24000,
-    stage2ArchiveTokens: 12000,
+    stage2RecordTokens: 12000,
     autoCompressArchive: true,
-    archiveCompressTarget: 600,
+    recordCondenseTarget: 8192,
     maxChatStates: 20,
     contextWindowShare: 0.3,
     recentAnswerTokens: 6000,
@@ -525,59 +522,59 @@ If any answer is NO, revise before submitting.
 Respond with ONLY the revised summary. No commentary, no preamble, no extra text.`;
 
 
-const CHRONICLE_PROMPT_TEMPLATE = `You are a chronological archivist. Do NOT roleplay. Do NOT produce any in-character text.
+const CHRONICLE_PROMPT_TEMPLATE = `You are keeping the running record of a roleplay. Do NOT roleplay. Do NOT produce
+any in-character text. You are not in the scene; you are the person writing down what happened in it.
 
 {{part_label}}
 
-Convert the conversation excerpt below into a compact chronological record.
+Below is new material from the chat. Write the part of the record that this material produces.
 
-The excerpt arrives INDEXED. Every line starts with \`[#42 · exchange 21 · reply]\`, which tells you the
-message number, which request-and-answer exchange it belongs to, and whether it is a request, a reply or
-the opening message (the one with no request before it — there is only ever one, and it stands alone).
+# **HOW TO USE TIME**
 
-RULES:
-- Process EVERY message in order. Do not skip any and do not summarize the whole thing at once.
-- ONE OUTPUT LINE PER INPUT LINE. Every \`[#n]\` you are given gets exactly one line back, carrying that same
-  \`[#n]\` verbatim. A request and the reply that answers it are TWO lines with TWO different numbers. Never
-  merge them, never drop one, never invent a number that was not in the excerpt.
-- {{time_rule}}
-- {{day_hint}}
-- After the timestamp and the index, name who acted (use names, not "User"/"Assistant").
-- Then write what actually happened, factually: no adjectives, no interpretation, no "they talked about".
-- A line may be a full short sentence, up to about two clauses. That room is deliberate: a fact squeezed out
-  here is gone for good. Put in who did it, what was said or decided, and anything irreversible.
-- If a message contains an EMBEDDED exchange — a text conversation, quoted messages, a transcript, a phone
-  screen, a chat log inside the message — record WHAT WAS SAID AND DONE IN IT. Never record the act of
-  typing, sending, reading, replying or stopping: "he typed a message" is not an event, "he asked her to
-  come to the boathouse at nine" is. The same goes for narration of the messenger itself.
-- If a message is only an action line, a gesture, a reaction or a fragment with no content, say what it
-  changed, not that it happened.
-- If something irreversible happens (a decision, a death, a reveal, a departure, a discovery), state it plainly.
-- If a request sets something up and the reply answers it, each line says its own half — the reader must be
-  able to follow the causality from one line to the next without the original text.
-- Preserve exact names, places, and objects as written.
+{{time_rule}}
 
-SCOPE — this record is the factual spine of the story, and nothing else:
-- Write ONLY what was said, done, decided, revealed or promised.
-- NO feelings, NO impressions, NO subtext, NO "seemed tense", NO tone, NO interpretation.
-  Everything about what things MEANT is written in the separate summary; putting it here
-  would duplicate that work and cost tokens twice.
-- If a line still makes sense once the emotional layer is written elsewhere, it belongs here.
+Where a message carries a real date and time, it is on the line in front of it. Where there is none, place
+events in plausible stretches of the day and stay honest about the uncertainty: "around 21:40", "shortly
+after", "later that night". An approximate time that reads naturally is worth more than a precise one that
+is wrong.
 
-FORMAT — one line per message, nothing else, in this exact shape:
-[July 12, 2025 1:15 PM] [#42] Name suggested meeting at the boathouse and named the time.
-[July 12, 2025 1:17 PM] [#43] Name agreed, warned her about the current, and took the oars.
+{{day_hint}}
 
-If real timestamps were supplied, copy the date and time exactly as given, including the real month name, and
-mention the place when the scene moves. If they were not, use [Day 1 09:12].
+# **WHAT THE RECORD IS FOR**
 
-Now output the record.
+It has to let someone who was not here follow the story: what happened, in what order, to whom, and what it
+changed. It is a record of events, not a transcript of messages.
 
-=== CONVERSATION EXCERPT ===
+- Group by scene or by stretch of time rather than by message. An evening that runs over ten messages is one
+  block of two or three lines, not ten lines.
+- Keep what carries the story: what people decide, reveal, promise, refuse, take or lose; who is where; what
+  changes between people; what is set up for later.
+- Let the rest go. Small talk, gestures, weather, food, repeated motions and reactions that change nothing do
+  not need writing down. Dropping them loses nothing, because this is a summary and not a copy.
+- Say who did it, by name. Never use the words "User" or "Assistant", or the title of the chat, as an actor.
+- If a message contains a conversation inside it — a text exchange, quoted messages, a phone screen — write
+  down what was said in it. Never write that someone typed, sent or stopped typing.
+- Do not comment on the recording itself, and do not write "they talked about" or "the scene continued".
+
+# **SHAPE**
+
+Follow this shape, but write it like a person keeping notes rather than filling in a form:
+
+## Day 1 — evening, Sergey's apartment
+20:40-21:10  Dinner. Sergey came home late and had picked up the cake on the way; Annie had been waiting
+             since six and did not say so. He gave her the corner piece without being asked.
+21:10-21:25  He said he loved her. First time, and he asked for nothing back. She said nothing and held
+             onto his shirt.
+
+## Day 2 — morning
+08:00-08:20  She left before he woke and took the spare key.
+
+=== NEW MATERIAL ===
 {{new_messages}}
-=== END EXCERPT ===
+=== END NEW MATERIAL ===
 
-Output only the timestamped lines, every one of them carrying its [#n].`;
+Output only the new blocks, continuing the numbering and the time ranges of the record. Do not rewrite or
+repeat the earlier part of the record — only what this material adds.`;
 
 const SUMMARY_STAGE2_FRAMING = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
 
@@ -726,11 +723,19 @@ function sanitizeStoredState() {
     for (const state of Object.values(settings.chats || {})) {
         if (!state || typeof state !== 'object') continue;
         if (state.summary) state.summary = clean(state.summary);
-        for (const line of Array.isArray(state.chronicle) ? state.chronicle : []) {
-            if (line && typeof line.text === 'string') line.text = clean(line.text);
+        if (state.record) state.record = clean(state.record);
+        // A record from before 1.19 was stored as an array of parsed lines.
+        if (!state.record && Array.isArray(state.chronicle) && state.chronicle.length) {
+            state.record = state.chronicle
+                .map(line => (line && line.ts ? `[${line.ts}] ${line.text}` : line && line.text))
+                .filter(Boolean)
+                .join('\n');
+            log('Converted a stored line archive of', state.chronicle.length, 'lines into the record');
         }
+        if (Array.isArray(state.chronicle)) delete state.chronicle;
         for (const snapshot of Array.isArray(state.snapshots) ? state.snapshots : []) {
             if (snapshot && typeof snapshot.summary === 'string') snapshot.summary = clean(snapshot.summary);
+            if (snapshot && typeof snapshot.record === 'string') snapshot.record = clean(snapshot.record);
         }
     }
 
@@ -750,6 +755,19 @@ function initSettings() {
             settings[key] = DEFAULT_SETTINGS[key];
         }
     }
+    // The 2.0 rename of the keys that came with the record. Their values are the
+    // same setting under the old name, so carry them over rather than dropping
+    // a configured budget on the floor.
+    for (const [was, now] of Object.entries({
+        chronicleBatchSize: 'recordBatchSize',
+        stage2ArchiveTokens: 'stage2RecordTokens',
+        archiveCompressTarget: 'recordCondenseTarget',
+    })) {
+        if (settings[was] !== undefined) {
+            if (settings[now] === undefined) settings[now] = settings[was];
+            delete settings[was];
+        }
+    }
     if (!settings.summaryPrompt) {
         settings.summaryPrompt = SUMMARY_PROMPT_TEMPLATE;
     }
@@ -763,7 +781,6 @@ function initSettings() {
             messageCountSinceSummary: settings.messageCountSinceSummary ?? 0,
             chronicle: Array.isArray(settings.chronicle) ? settings.chronicle : [],
             lorebook: (settings.lorebook && typeof settings.lorebook === 'object') ? settings.lorebook : {},
-            lorebookProcessedUpTo: settings.lorebookProcessedUpTo ?? -1,
         };
         if (!settings.chats || typeof settings.chats !== 'object') settings.chats = {};
         const ctx = getContext();
@@ -822,20 +839,24 @@ const EMPTY_CHAT_STATE = () => ({
     summaryMessageId: -1,
     lastSummarizedIndex: -1,
     messageCountSinceSummary: 0,
-    chronicle: [],
-    chronicleCompressedAt: 0,
+    record: '',
+    recordCondensedAt: 0,
     lorebook: {},
-    lorebookProcessedUpTo: -1,
+    lorebookProcessedBlock: -1,
     lastLorebookUpdate: 0,
     touchedAt: 0,
-    archiveRevision: 0,
     lastArchiveProblem: '',
     snapshots: [],
 });
 
 /**
- * Per-chat state. Archive, summary and lorebook belong to the conversation
- * they were built from, so they are namespaced by chat type and id.
+ * Per-chat state. Record, summary and lorebook belong to the conversation they
+ * were built from, so they are namespaced by chat type and id.
+ *
+ * `record` is one document the model writes: a chronology in blocks of time, in
+ * its own words, rather than a line per message. Nothing parses it and nothing
+ * reorders it, because a record shaped by a line format becomes a transcript of
+ * every message instead of a record of the story.
  */
 function getChatState() {
     const settings = getSettings();
@@ -936,50 +957,53 @@ function extractSection(summary, sectionNames) {
     return '';
 }
 
-function formatArchiveLines(lines) {
-    return (lines || [])
-        .map(e => (e.ts ? `[${e.ts}] ` : '') + e.text)
-        .join('\n');
+/** The record as it stands, trimmed. */
+function getRecord() {
+    return (getChatState().record || '').trim();
 }
 
-function appendChronicleBlock(entries) {
+/**
+ * The name of the conversation, used only to spot messages titled with it.
+ * In a group chat SillyTavern puts the chat name on messages that have no
+ * character of their own, and that name is not a speaker.
+ */
+function chatTitle() {
+    const ctx = getContext();
+    const meta = ctx.chat_metadata || {};
+    return String(meta.group_name || meta.chat_name || ctx.chatName || ctx.name1 || '').trim();
+}
+
+/**
+ * Add what the archivist just wrote to the record.
+ *
+ * Nothing is validated and nothing is parsed: the model writes this document, and
+ * the record it produced under a strict line format was a transcript of every
+ * message rather than a story. The only thing checked is whether the whole
+ * document came back instead of just the new part, because that duplicates
+ * history silently.
+ */
+function appendToRecord(addition) {
     const state = getChatState();
-    if (!Array.isArray(state.chronicle)) state.chronicle = [];
+    const { record, duplicated, added } = appendRecord(state.record, addition);
 
-    // Appended in the order the messages happened, never re-sorted. Sorting the
-    // record by a clock the model wrote would reorder real history whenever it
-    // invented, reset or copied a time wrong, and a story that jumps around is
-    // far more damaging than one with an approximate stamp.
-    const previous = state.chronicle[state.chronicle.length - 1] || null;
-    for (const p of entries) {
-        state.chronicle.push({ ts: p.ts, id: p.id || '', text: p.text });
+    state.record = record;
+    if (added) state.recordCondensedAt = 0;
+
+    const stats = recordStats(record);
+    if (duplicated) {
+        log('WARNING: the archivist returned the whole record instead of only the new part — ' +
+            'check the record panel for a repeated section');
     }
-
-    const breaks = chronologyBreaks(entries, previous);
-    if (breaks.length) {
-        log('WARNING: ' + breaks.length + ' line(s) go backwards in time (e.g. "' +
-            breaks[0].from + '" then "' + breaks[0].to + '"). The order was kept as written; ' +
-            'check the message headers if the stamps are supposed to be real.');
-    }
-
-    saveSettingsDebounced();
-    log('Archive lines appended:', entries.length, 'total:', state.chronicle.length);
-    return entries.length;
+    saveSettingsNow();
+    log(`Record +${added} block(s): ${stats.blocks} blocks, ~${stats.tokens} tokens, ${stats.words} words`);
+    return added;
 }
 
+/** Blocks of the record that match a search, for the slash command. */
 function searchChronicle(query) {
-    const state = getChatState();
-    if (!Array.isArray(state.chronicle)) return [];
-
-    const q = String(query || '').toLowerCase();
+    const q = String(query || '').toLowerCase().trim();
     if (!q) return [];
-    return state.chronicle.filter(e => e.text.toLowerCase().includes(q));
-}
-
-/** Archive lines that fit a token budget, newest first in priority. */
-function archiveWithinBudget(budgetTokens) {
-    const state = getChatState();
-    return fitArchiveToBudget(state.chronicle, budgetTokens);
+    return recordBlocks(getRecord()).filter(block => block.toLowerCase().includes(q));
 }
 
 /**
@@ -1418,7 +1442,7 @@ function tokenStats() {
         absorbedCount,
         absorbedTokens,
         liveTokens,
-        archiveTokens: estimateTokens(formatArchiveLines(state.chronicle)),
+        archiveTokens: estimateTokens(state.record),
         summaryTokens: estimateTokens(state.summary),
         lorebookTokens: estimateTokens(formatLorebookForDisplay()),
         budgetTokens: (settings.injectArchiveTokens || 0) + (settings.injectSummaryTokens || 0) + (settings.injectLorebookTokens || 0),
@@ -1427,7 +1451,7 @@ function tokenStats() {
 
 /**
  * A snapshot taken before a summarization run, so a bad result can be undone.
- * The chronicle is copied rather than truncated because compression rewrites it.
+ * The record is copied as text because condensing rewrites the whole document.
  */
 function pushSnapshot(reason) {
     const state = getChatState();
@@ -1436,18 +1460,17 @@ function pushSnapshot(reason) {
         at: Date.now(),
         reason: reason || 'before summarization',
         summary: state.summary,
-        chronicle: state.chronicle.slice(),
+        record: state.record,
         lastSummarizedIndex: state.lastSummarizedIndex,
-        archiveRevision: state.archiveRevision,
         summaryMessageId: state.summaryMessageId,
     };
     history.push(snapshot);
     // Two is enough to undo the last run and the one before it, without letting
-    // the settings file grow with copies of a long archive.
+    // the settings file grow with copies of a long record.
     while (history.length > 2) history.shift();
     state.snapshots = history;
     saveSettingsDebounced();
-    log('Snapshot taken:', snapshot.reason, '|', state.chronicle.length, 'archive lines');
+    log('Snapshot taken:', snapshot.reason, '|', recordStats(state.record).blocks, 'record blocks');
     return snapshot;
 }
 
@@ -1482,17 +1505,18 @@ function rollbackSummary() {
     }
 
     state.summary = snap.summary;
-    state.chronicle = snap.chronicle.slice();
+    state.record = snap.record || '';
     state.lastSummarizedIndex = snap.lastSummarizedIndex;
-    state.archiveRevision = snap.archiveRevision;
     state.summaryMessageId = snap.summaryMessageId;
-    state.lorebookProcessedUpTo = -1;
+    // Condensing rewrote the blocks, so the lorebook has to walk them again.
+    state.lorebookProcessedBlock = -1;
     history.pop();
     state.snapshots = history;
 
     saveSettingsNow();
     updateUI();
-    return `Rolled back to the summarization from ${new Date(snap.at).toLocaleTimeString()}. ${snap.chronicle.length} archive lines, watermark at ${snap.lastSummarizedIndex}.`;
+    return `Rolled back to the summarization from ${new Date(snap.at).toLocaleTimeString()}. ` +
+        `${recordStats(state.record).blocks} record blocks restored, watermark at ${snap.lastSummarizedIndex}.`;
 }
 
 /** Count core memories so a revision that silently drops them can be spotted. */
@@ -1723,59 +1747,84 @@ function getRecentAnswers(count) {
     return chat.filter(m => !m.is_user && !m.is_system).slice(-n);
 }
 
-const ARCHIVE_COMPRESS_PROMPT = `You are compressing a chronological archive of a roleplay. Do NOT roleplay. Do NOT add anything that is not in the lines below.
+const RECORD_CONDENSE_PROMPT = `You are shortening the running record of a roleplay. Do NOT roleplay.
 
-Merge the oldest lines into a shorter set that preserves, in order: every irreversible event, every reveal, every relationship change, every place entered, every named object that matters, and every unresolved thread. Small talk, weather, repeated gestures, and scenery MUST be dropped. Keep the timestamps.
+The record below has grown too long to sit in a prompt next to everything else. Rewrite it shorter.
 
-Output only merged lines in the same format: [Day N HH:MM] text
+Keep, in this order of importance:
+- Every decision, reveal, promise, refusal and irreversible act.
+- Every change between people: what shifted, who chose it, and why.
+- Where things happen and who is present.
+- The shape: keep the blocks and their time ranges, compressed rather than dropped. A reader must still
+  be able to say when something happened and what came before it.
 
-=== LINES TO COMPRESS ===
-{{batch}}
-=== END LINES ===
+Drop first:
+- Scenes that changed nothing and led nowhere.
+- The same beat said again in more words.
+- Atmosphere, gesture and scenery that no later event depends on.
 
-Output only timestamped lines, at most half the input length.`;
+Where two blocks can become one, merge them and widen the time range. Keep every name exactly as written.
+Invent nothing that is not in the record, and do not drop a turning point to save space.
+
+=== RECORD ===
+{{record}}
+=== END RECORD ===
+
+Output only the rewritten record.`;
 
 /**
- * Keep the archive from growing without bound. Older lines are merged into
- * denser ones; nothing is discarded outright.
+ * Keep the record inside its budget by asking the model to rewrite it.
+ *
+ * The record is the model's own document, so shrinking it is a writing job and not
+ * a line-trimming job. Dropping the oldest lines would throw away the oldest part
+ * of the story, which is exactly the part the summary leans on most.
  */
-async function maybeCompressArchive() {
+async function maybeCondenseRecord() {
     const settings = getSettings();
     if (!settings.autoCompressArchive || isCancelled()) return;
 
     const state = getChatState();
-    if (!Array.isArray(state.chronicle)) return;
+    const record = state.record || '';
+    if (!record.trim()) return;
 
-    const target = Math.max(50, settings.archiveCompressTarget);
-    if (state.chronicle.length <= target) return;
-    if (state.chronicleCompressedAt && state.chronicle.length - state.chronicleCompressedAt < target) return;
+    // The ceiling is the shorter of what the record is allowed to occupy and what
+    // the condensing pass targets, so the two never disagree.
+    const ceiling = Math.max(500, Math.min(
+        settings.injectArchiveTokens || 3000,
+        settings.recordCondenseTarget || 8192,
+    ));
+    const tokens = estimateTokens(record);
+    if (tokens <= ceiling) return;
 
-    const oldestCount = state.chronicle.length - target;
-    const oldest = state.chronicle.slice(0, oldestCount);
-    const kept = state.chronicle.slice(oldestCount);
-    const logTokens = estimateTokens(formatArchiveLines(oldest));
+    // Condensing is only worth a request once there is something to gain, and not
+    // again immediately after the last one.
+    if (tokens - (state.recordCondensedAt || 0) < ceiling * 0.5) return;
 
     try {
-        const prompt = guardrail() + buildSummaryPrompt(ARCHIVE_COMPRESS_PROMPT, {
-            '{{batch}}': formatArchiveLines(oldest),
+        const prompt = guardrail() + buildSummaryPrompt(RECORD_CONDENSE_PROMPT, {
+            '{{record}}': record,
         });
-        const text = await runCompletion(prompt, 'archive compression', { fallbackTokens: 8192 });
-        const parsed = parseChronicleBlock(text);
-        if (!parsed.entries.length) {
-            log('Archive compression produced nothing — keeping lines as they are');
+        log(`Record is ~${tokens} tokens against a ${ceiling} ceiling — asking the model to condense it`);
+        const text = await runCompletion(prompt, 'record condense', { fallbackTokens: 16384 });
+
+        const condensed = String(text || '').trim();
+        if (!condensed || estimateTokens(condensed) >= tokens * 0.95) {
+            log('The condensed record was not shorter — keeping the current one');
+            state.recordCondensedAt = tokens;
+            saveSettingsNow();
             return;
         }
-        // Merged lines keep the position of the oldest they replace, so the
-        // order of the record is preserved exactly as it was appended.
-        state.chronicle = parsed.entries.concat(kept);
-        state.chronicleCompressedAt = state.chronicle.length;
-        // Bumping the revision tells the lorebook pass that its line indices are stale.
-        state.archiveRevision = (state.archiveRevision ?? 0) + 1;
-        saveSettingsDebounced();
-        log('Archive compressed:', oldest.length, 'lines (~' + logTokens + ' tokens) ->', parsed.entries.length);
-    } catch (error) {
+
+        state.record = condensed;
+        state.recordCondensedAt = estimateTokens(condensed);
+        // Condensing rewrites every block, so the lorebook has to walk them again.
+        state.lorebookProcessedBlock = -1;
+        saveSettingsNow();
+        log('Record condensed:', tokens, '->', state.recordCondensedAt, 'tokens');
+} catch (error) {
         if (error.isCancelled || isCancelled()) throw error;
-        console.error(`[${MODULE_NAME}] Archive compression failed:`, error);
+        console.error(`[${MODULE_NAME}] Record condense failed:`, error);
+        log('Record condense failed:', describeFailure(error));
     }
 }
 
@@ -1811,16 +1860,15 @@ async function generateSummary() {
             pending.length,
         );
 
-        // A record line costs roughly this many output tokens, so the manual
-        // batch size is the knob that trades speed against cost per request.
-        const manual = Math.max(5, settings.chronicleBatchSize);
+        // A record of a batch costs a fraction of a transcript of it, so a large
+        // batch is cheap on output and keeps the time ranges continuous.
+        const manual = Math.max(5, settings.recordBatchSize);
         const batchSize = Math.max(1, Math.min(manual, pending.length));
 
-        log('Stage 1: archiving', pending.length, 'messages in batches of', batchSize,
+        log('Stage 1: recording', pending.length, 'messages in', Math.ceil(pending.length / batchSize),
+            'batch(es) of up to', batchSize,
             '| request output limit:', getSettings().requestTokenLimit || 'inherit from SillyTavern');
 
-        // Walk the backlog with an explicit cursor so the batch size can shrink
-        // mid-run after a rejected request, without re-slicing from the start.
         let cursor = 0;
         let batchNo = 0;
         while (cursor < pending.length) {
@@ -1829,30 +1877,26 @@ async function generateSummary() {
             batchNo++;
             const remaining = pending.length - cursor;
             const totalBatches = Math.ceil(remaining / batchSize);
-            const expected = batch.length;
-            // The absolute numbers of the messages in this batch, so the record
-            // can be checked against the input rather than against a line count.
-            const firstIdx = Math.max(0, chat.indexOf(batch[0]));
-            const batchIds = batch.map((_, i) => String(firstIdx + i));
-            setStatus(`stage 1/2: batch ${batchNo}/${totalBatches} (${expected} messages)...`);
+            setStatus(`stage 1/2: recording batch ${batchNo}/${totalBatches} (${batch.length} messages)...`);
 
             const hasHeaders = useHeaders(batch);
             const chronPrompt = guardrail() + buildSummaryPrompt(CHRONICLE_PROMPT_TEMPLATE, {
                 '{{new_messages}}': formatMessagesForArchive(batch, {
                     maxChars: perBatchChars,
                     useHeaders: hasHeaders,
-                    startIndex: firstIdx,
+                    // A group chat titles its messages with the chat name, and that
+                    // name is not a speaker.
+                    title: chatTitle(),
                 }),
-                '{{part_label}}': remaining > batchSize ? `This is part ${batchNo}, in chronological order.` : '',
+                '{{part_label}}': totalBatches > 1
+                    ? `This is part ${batchNo} of ${totalBatches}. The record already covers everything before it, ` +
+                      'so continue the dates, the day numbering and the time ranges from where it left off.'
+                    : '',
                 '{{time_rule}}': hasHeaders
-                    ? 'EVERY line above carries the REAL date, time and location of that message. Copy the date, the time and the place exactly as given. NEVER invent, renumber or estimate a time, and never reuse one line\'s time for the next: reuse the one written on THAT line.'
-                    // Without headers there is nothing to copy, and an invented clock
-                    // is worse than no clock: it silently reorders the record later.
-                    : 'These messages carry no date, time or place, so you must NOT invent any. Write [Day N] and nothing else, advancing N only when the material clearly moves on. Never write a clock time, a real date or a location you were not given.',
-                '{{day_hint}}': batchNo > 1
-                    ? (hasHeaders
-                        ? 'Use the exact date and time given on each message. Do not renumber or re-derive them.'
-                        : 'Continue the day counter from where the previous part ended.')
+                    ? 'Copy those times onto the ranges you write.'
+                    : 'The messages carry no timestamps at all, so work every time out of the material itself.',
+                '{{day_hint}}': batchNo > 1 && !hasHeaders
+                    ? 'Carry the day numbering forward from the part before this one.'
                     : '',
             });
             if (hasHeaders) {
@@ -1861,66 +1905,25 @@ async function generateSummary() {
                 const sample = batch
                     .map(m => parseMessageHeader(m && m.mes || ''))
                     .find(h => h.found);
-                log('Archive batch uses real message timestamps: ' +
+                log('Record batch can use real timestamps: ' +
                     (sample ? (metaStamp(sample.meta) || 'a header with no date or time') : 'a header was detected on some messages only'));
             } else {
-                log('Archive batch has no Date/Time headers — the record will carry [Day N] instead of invented clock times');
+                log('Record batch has no Date/Time headers — the record will place the events from the material itself');
             }
 
             const chronText = await runCompletion(chronPrompt, `archive batch ${batchNo}/${totalBatches}`);
 
-            // Validate before committing: a refusal or untimestamped prose must
-            // never move the watermark, or real history is lost silently.
-            const parsed = parseChronicleBlock(chronText);
-            const verdict = validateChronicleResponse(parsed, expected);
-
-            // Every message that went in has to come back, or the record claims
-            // to cover history it silently skipped. Counting lines cannot show
-            // which message was lost; the indices the model was given can.
-            const coverage = verifyChronicleCoverage(parsed.entries, batchIds);
-            if (coverage.checked && !coverage.ok) {
-                const lost = coverage.missing.slice(0, 8).map(id => `#${id}`).join(', ') +
-                    (coverage.missing.length > 8 ? `, +${coverage.missing.length - 8} more` : '');
-                verdict.problems.push(
-                    `the record does not cover ${coverage.missing.length} of ${expected} messages (${lost})` +
-                    (coverage.duplicated.length ? `, and repeats ${coverage.duplicated.length}` : ''));
-                verdict.ok = false;
-                log('Coverage gap: missing', coverage.missing.join(','),
-                    '| duplicated', coverage.duplicated.join(',') || 'none',
-                    '| invented', coverage.extra.join(',') || 'none');
-            }
-
-            // A record that skips messages is a record that will never be
-            // rewritten: the watermark moves past them and they are gone from
-            // both the prompt and the record. Losing more than a fifth of a batch
-            // is a failed batch, not a rough one.
-            const coverageFloor = settings.strictArchive ? 1 : 0.8;
-            const nothingUsable = parsed.entries.length === 0;
-            const coverageTooThin = coverage.checked && coverage.ratio < coverageFloor;
-            const rejected = nothingUsable || coverageTooThin || (settings.strictArchive && !verdict.ok);
-
-            if (rejected) {
-                const why = verdict.problems.join('; ');
-                const sample = String(chronText || '').trim().slice(0, 400);
-                state.lastArchiveProblem = `${why}\n\n--- model replied ---\n${sample}`;
-                setStatus(`archive batch ${batchNo}/${totalBatches} rejected (${why}) — see the archive panel`);
-                log('Chronicle batch rejected:', why);
-                log('Expected ' + expected + ' lines, got ' + parsed.entries.length +
-                    ' lines (' + parsed.datedCount + ' dated, ' + parsed.totalNonEmpty + ' non-empty)');
-                log('Model reply sample:\n' + sample);
+            // The archivist is writing a document, so there is nothing to parse and
+            // nothing to score. What is left to catch is a refusal dressed as a
+            // record and an answer that says nothing at all; both are handled where
+            // the request is made. A thin answer is logged rather than rejected,
+            // because refusing to record it would lose the messages for good.
+            const added = appendToRecord(chronText);
+            if (!added) {
+                log('Archive batch produced no new text — the watermark stays where it is');
                 break;
             }
-
-            if (!verdict.ok) {
-                // Imperfect but usable: record it, keep the reason visible.
-                const why = verdict.problems.join('; ');
-                state.lastArchiveProblem = `accepted with warnings: ${why}`;
-                log('Archive batch accepted despite warnings:', why);
-            } else {
-                state.lastArchiveProblem = '';
-            }
-
-            appendChronicleBlock(parsed.entries);
+            state.lastArchiveProblem = '';
             cursor += batch.length;
 
             // Commit per batch: the watermark only advances over what is already
@@ -1940,24 +1943,23 @@ async function generateSummary() {
             }
         }
 
-        // Compress only once the whole archiving pass is committed, so a failure
-        // mid-pass leaves the full uncompressed record to retry from.
-        if (absorbed) await maybeCompressArchive();
+        // Condense only once the whole recording pass is committed, so a failure
+        // mid-pass leaves the record as it was to retry from.
+        if (absorbed) await maybeCondenseRecord();
 
         log('Stage 1 finished, watermark at', state.lastSummarizedIndex);
 
         if (!absorbed) {
-            setStatus('archive produced nothing usable — summary left untouched');
+            setStatus('the record produced nothing new — summary left untouched');
             return;
         }
         throwIfCancelled();
 
-        // Stage 2 — summary from the record plus the live edge of the story.
+        // Stage 2 — the story bible, from the record plus the live edge.
         setStatus('stage 2/2: revising summary...');
         const recentRaw = getRecentAnswers(settings.recentAnswerCount);
         const hasHeaders = useHeaders(recentRaw);
-        // The header is stripped here: the archive already carries the stamps,
-        // and repeating them on every recent answer only burns the budget.
+        // The header is stripped here: the record already carries the times.
         const recent = hasHeaders ? stripHeaders(recentRaw) : recentRaw;
 
         // This is the biggest request the extension makes, so the two variable
@@ -1971,10 +1973,10 @@ async function generateSummary() {
             window: getContextWindow(),
             share: settings.contextWindowShare ?? 0.3,
             overheadTokens: scaffolding,
-            archiveTokens: budgetFor(settings.stage2ArchiveTokens),
+            archiveTokens: budgetFor(settings.stage2RecordTokens),
             recentTokens: budgetFor(settings.recentAnswerTokens),
         });
-        log('Stage 2: scaffolding ~' + scaffolding + ' tokens | archive budget ' +
+        log('Stage 2: scaffolding ~' + scaffolding + ' tokens | record budget ' +
             fitted.archive + ' | recent budget ' + fitted.recent +
             (fitted.capped ? ' | CAPPED (' + fitted.cappedBy + ')' : '') +
             (fitted.cappedBy === 'window' ? ' | usable ' + fitted.usable + ' of a ' + getContextWindow() + ' window' : ''));
@@ -1985,7 +1987,7 @@ async function generateSummary() {
             return;
         }
 
-        let recordScale = 1;
+        let scale = 1;
 
         // The material for the request, rebuilt at a smaller size when the
         // backend turns out to disagree about how much fits.
@@ -1993,25 +1995,33 @@ async function generateSummary() {
             // One long roleplay reply can swamp the request, so the recent answers
             // get a shared character budget rather than going in at full length.
             const perMsgChars = perMessageCharLimit(
-                Math.max(200, Math.round(fitted.recent * recordScale)) * 4,
+                Math.max(200, Math.round(fitted.recent * scale)) * 4,
                 recent.length,
             );
             const recentText = formatMessagesForSummary(recent, { maxChars: perMsgChars });
 
-            // Select the archive lines that matter for this moment rather than
-            // flooding the request with the entire history.
-            const archiveBudget = Math.max(0, Math.round(fitted.archive * recordScale));
-            const picked = selectRelevantArchive(state.chronicle, recentText, {
-                budgetTokens: archiveBudget,
-            });
-            log('Stage 2: archive lines', picked.lines.length, 'of', state.chronicle.length,
-                '(~' + picked.used + ' tokens, dropped ' + picked.dropped + ', scale ' + recordScale.toFixed(2) + ')');
+            // The record is a document now, so it is trimmed by dropping whole
+            // blocks from the end of the budget rather than by ranking lines: the
+            // model wrote it as a sequence of time blocks and splitting a block
+            // would leave the reader without its heading.
+            const recordBudget = Math.max(0, Math.round(fitted.archive * scale));
+            const blocks = recordBlocks(getRecord());
+            let used = 0;
+            const kept = [];
+            for (let i = blocks.length - 1; i >= 0; i--) {
+                const cost = estimateTokens(blocks[i]);
+                if (used + cost > recordBudget) break;
+                kept.unshift(blocks[i]);
+                used += cost;
+            }
+            log('Stage 2: record blocks', kept.length, 'of', blocks.length,
+                '(~' + used + ' tokens, scale ' + scale.toFixed(2) + ')');
             log('Stage 2: recent answers', recent.length, '| per-message limit', perMsgChars, 'chars',
                 '| headers stripped:', hasHeaders);
 
             return {
                 recentText,
-                recordText: formatArchiveLines(picked.lines) || '(the archive is empty)',
+                recordText: kept.join('\n\n') || '(the record is empty so far)',
             };
         };
 
@@ -2027,15 +2037,15 @@ async function generateSummary() {
         // halved and the same request is rebuilt, rather than repeating the same
         // too-large request until the retries run out.
         const shrinkMaterial = () => {
-            if (recordScale <= 0.2) return null;
-            recordScale = recordScale <= 0.5 ? 0.5 : 0.35;
+            if (scale <= 0.2) return null;
+            scale = scale <= 0.5 ? 0.5 : 0.35;
             material = buildMaterial();
             sumPrompt = buildStage2Prompt({
                 summaryText: state.summary,
                 recordText: material.recordText,
                 recentText: material.recentText,
             });
-            log('Stage 2: the request did not fit — retrying with ~' + Math.round(recordScale * 100) +
+            log('Stage 2: the request did not fit — retrying with ~' + Math.round(scale * 100) +
                 '% of the material, ~' + estimateTokens(sumPrompt) + ' tokens');
             return sumPrompt;
         };
@@ -2104,9 +2114,9 @@ async function rebuildLorebook() {
     }
 
     const state = getChatState();
-    const chronicle = Array.isArray(state.chronicle) ? state.chronicle : [];
-    if (chronicle.length === 0) {
-        setStatus('no archived history to process — run a summary first');
+    const blocks = recordBlocks(getRecord());
+    if (blocks.length === 0) {
+        setStatus('no recorded history to process — run a summary first');
         return;
     }
 
@@ -2116,38 +2126,27 @@ async function rebuildLorebook() {
     updateUI();
 
     try {
-        // Compression rewrites the archive array, which invalidates a positional
-        // progress marker. A revision bump forces a clean re-scan rather than
-        // silently skipping or repeating the lines in between.
-        if (state.lorebookRevision !== state.archiveRevision) {
-            log('Archive changed since the last lorebook pass — rescanning from the start');
-            state.lorebookProcessedUpTo = -1;
-            state.lorebookRevision = state.archiveRevision;
-            saveSettingsDebounced();
-        }
-
-        const batchSize = Math.max(10, settings.lorebookBatchSize);
+        const batchSize = Math.max(2, Math.ceil(settings.lorebookBatchSize / 10));
         const maxBatches = Math.max(1, settings.lorebookMaxBatches);
-        const unprocessedFrom = Math.max(0, state.lorebookProcessedUpTo ?? -1) + 1;
+        const unprocessedFrom = Math.max(0, state.lorebookProcessedBlock ?? -1) + 1;
 
         const batches = [];
-        for (let i = unprocessedFrom; i < chronicle.length && batches.length < maxBatches; i += batchSize) {
-            batches.push(chronicle.slice(i, i + batchSize));
+        for (let i = unprocessedFrom; i < blocks.length && batches.length < maxBatches; i += batchSize) {
+            batches.push(blocks.slice(i, i + batchSize));
         }
 
         if (batches.length === 0) {
-            setStatus('archive already processed — nothing new for the lorebook');
+            setStatus('the record is already processed — nothing new for the lorebook');
             return;
         }
 
-        setStatus(`lorebook: ${batches.length} batch(es) from line ${unprocessedFrom + 1}...`);
+        setStatus(`lorebook: ${batches.length} batch(es) from block ${unprocessedFrom + 1} of ${blocks.length}...`);
         let added = 0;
         let skipped = 0;
 
         for (let b = 0; b < batches.length; b++) {
             throwIfCancelled();
             const batch = batches[b];
-            const batchText = formatArchiveLines(batch);
             const batchEnd = unprocessedFrom + (b + 1) * batchSize - 1;
 
             const existing = Object.values(state.lorebook || {})
@@ -2156,7 +2155,7 @@ async function rebuildLorebook() {
 
             const prompt = guardrail() + buildSummaryPrompt(LOREBOOK_PROMPT_TEMPLATE, {
                 '{{existing_lorebook}}': existing || '(lorebook is empty)',
-                '{{batch}}': batchText,
+                '{{batch}}': batch.join('\n\n'),
             });
 
             setStatus(`lorebook: batch ${b + 1}/${batches.length}...`);
@@ -2171,29 +2170,29 @@ async function rebuildLorebook() {
             });
 
             if (!mayAdvance) {
-                // Refusing to advance means these lines are retried on the next
+                // Refusing to advance means these blocks are retried on the next
                 // run instead of being lost to a malformed response.
                 skipped++;
                 setStatus(`lorebook: batch ${b + 1}/${batches.length} produced no usable entries (${parsed.rejected} rejected) — will retry`);
-                log('Lorebook batch produced nothing parseable; watermark held at', state.lorebookProcessedUpTo);
+                log('Lorebook batch produced nothing parseable; progress held at block', state.lorebookProcessedBlock);
                 break;
             }
 
             const merged = mergeLorebook(state.lorebook, parsed.entries, new Date().toISOString());
             state.lorebook = merged.next;
             added += merged.added;
-            state.lorebookProcessedUpTo = Math.min(batchEnd, chronicle.length - 1);
+            state.lorebookProcessedBlock = Math.min(batchEnd, blocks.length - 1);
             state.lastLorebookUpdate = Date.now();
-            saveSettingsDebounced();
+            saveSettingsNow();
         }
 
         const total = Object.keys(state.lorebook || {}).length;
         setStatus(skipped
-            ? `lorebook paused at line ${state.lorebookProcessedUpTo} — ${total} entries kept, retry needed for the rest`
+            ? `lorebook paused at block ${state.lorebookProcessedBlock + 1} of ${blocks.length} — ${total} entries kept, retry needed for the rest`
             : `lorebook done: ${total} entries (+${added} new/updated)`);
     } catch (error) {
         if (error.isCancelled || isCancelled()) {
-            setStatus(`lorebook stopped — completed batches kept, through line ${state.lorebookProcessedUpTo}`);
+            setStatus(`lorebook stopped — completed batches kept, through block ${state.lorebookProcessedBlock + 1}`);
             log('Lorebook run stopped by user');
         } else {
             console.error(`[${MODULE_NAME}] Lorebook build failed:`, error);
@@ -2282,29 +2281,43 @@ function injectIntoPrompt(eventData) {
 
     // One ceiling for everything this extension injects, because three separate
     // budgets add up to a number nobody chose. The order of sacrifice is fixed and
-    // stated: the state the model has to act on survives, the world facts go
-    // first, and the archive lines in between.
+    // stated: the story bible the model has to act on survives, the world facts go
+    // first, and the record in between.
     const ceiling = Math.max(0, settings.injectTotalTokens ?? 24000);
     let remaining = ceiling;
     const spend = (text) => { remaining -= estimateTokens(text); };
 
-    // Before the history: what happened. The archive is the factual spine, one
-    // line per indexed message, so nothing here repeats what it already says.
+    // Before the history: what happened. The record is the model's own document of
+    // events in time blocks, so nothing here repeats what it already says.
     const coreMemories = extractSection(summary, 'Core Memories');
     spend(coreMemories);
-    const archive = archiveWithinBudget(Math.min(settings.injectArchiveTokens, Math.max(0, remaining)));
+
+    // Trimmed by whole blocks from the oldest end, because a block that loses its
+    // heading leaves the reader without the time it belonged to.
+    const recordBudget = Math.max(0, Math.min(settings.injectArchiveTokens, remaining));
+    const allBlocks = recordBlocks(getRecord());
+    let recordUsed = 0;
+    let recordKept = 0;
+    for (let i = allBlocks.length - 1; i >= 0; i--) {
+        const cost = estimateTokens(allBlocks[i]);
+        if (recordUsed + cost > recordBudget) break;
+        recordUsed += cost;
+        recordKept = i;
+    }
+    const recordText = allBlocks.slice(recordKept).join('\n\n');
+    const recordDropped = recordKept;
 
     let before = '';
     if (coreMemories) before += `### Core Memories\n${coreMemories}\n\n`;
-    if (archive.lines.length) {
-        before += `### Chronological Archive\n${formatArchiveLines(archive.lines)}\n\n`;
-        if (archive.dropped) {
-            before += `_(${archive.dropped} older archived lines omitted for length.)_\n\n`;
+    if (recordText) {
+        before += `### The Record So Far\n${recordText}\n\n`;
+        if (recordDropped) {
+            before += `_(${recordDropped} older block(s) of the record omitted for length.)_\n\n`;
         }
     }
-    spend(archive.lines.length ? formatArchiveLines(archive.lines) : '');
+    spend(recordText);
 
-    // After the history: everything the archive cannot hold — who these characters
+    // After the history: everything the record cannot hold — who these characters
     // are, how the relationships work, what is still in play, and the world facts.
     // Each one is looked up under its current name first and its old one second, so
     // a summary written before the rename keeps being injected.
@@ -2315,7 +2328,7 @@ function injectIntoPrompt(eventData) {
     const threads = extractSection(summary, ['Open Threads', 'Future Plot Hooks']);
 
     let after = '';
-    if (keyEvents) after += `### Key Events And What They Changed\n${keyEvents}\n\n`;
+    if (keyEvents) after += `### What Decided The Story\n${keyEvents}\n\n`;
     if (characterTruths) after += `### Who These Characters Are\n${characterTruths}\n\n`;
     if (dynamics) after += `### How The Relationships Work\n${dynamics}\n\n`;
     if (secrets) after += `### Secrets And Knowledge\n${secrets}\n\n`;
@@ -2370,7 +2383,7 @@ function injectIntoPrompt(eventData) {
     log('Injected ~' + totalBefore + ' tokens of history and ~' + totalAfter + ' tokens of current state' +
         (injected > ceiling ? ` — OVER the ${ceiling} ceiling` : ` (ceiling ${ceiling})`));
     if (injected > ceiling) {
-        log('WARNING: the injected material is still above the ceiling; lower Archive injected or Lorebook injected');
+        log('WARNING: the injected material is still above the ceiling; lower Record injected or Lorebook injected');
     }
 }
 
@@ -2678,13 +2691,13 @@ function reindexAfterDeletion() {
     reconcileFlagsWithWatermark(chatLengthChanged(chat));
     const next = state.lastSummarizedIndex;
 
-    if (previous >= 0 && next < 0 && (state.chronicle.length || state.summary)) {
-        resetStateForRebuild('the archived region is no longer in the chat');
+    if (previous >= 0 && next < 0 && ((state.record || '').trim() || state.summary)) {
+        resetStateForRebuild('the recorded region is no longer in the chat');
         return;
     }
 
     if (next !== previous) {
-        state.lorebookProcessedUpTo = -1;
+        state.lorebookProcessedBlock = -1;
         log('Watermark re-derived after a deletion:', previous, '->', next);
     }
 
@@ -2813,8 +2826,8 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Messages per archive request:
-                    <input type="number" id="es_chronicle_batch" value="${settings.chronicleBatchSize}" min="5" max="400" step="5" style="width: 70px;">
+                    Messages per record request:
+                    <input type="number" id="es_record_batch" value="${settings.recordBatchSize}" min="5" max="400" step="5" style="width: 70px;">
                 </label>
             </div>
             <div class="enhanced-summary-row">
@@ -2852,13 +2865,13 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Archive injected:
+                    Record injected:
                     <input type="number" id="es_inject_archive" value="${settings.injectArchiveTokens}" min="0" max="60000" step="250" style="width: 90px;">
                 </label>
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Summary injected:
+                    Story bible injected:
                     <input type="number" id="es_inject_summary" value="${settings.injectSummaryTokens}" min="0" max="60000" step="250" style="width: 90px;">
                 </label>
             </div>
@@ -2875,12 +2888,12 @@ function createUI() {
                 </label>
             </div>
             <div class="enhanced-summary-row es-note">
-                <span>The one number that decides the size of every request. The state the model acts on is kept first, the world facts are sacrificed first.</span>
+                <span>The one number that decides the size of every request. The story bible is kept first, the world facts are sacrificed first.</span>
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Archive lines in summary request:
-                    <input type="number" id="es_stage2_archive" value="${settings.stage2ArchiveTokens}" min="500" max="200000" step="500" style="width: 90px;">
+                    Record in the summarization request:
+                    <input type="number" id="es_stage2_archive" value="${settings.stage2RecordTokens}" min="500" max="200000" step="500" style="width: 90px;">
                 </label>
             </div>
             <div class="enhanced-summary-row">
@@ -2891,9 +2904,12 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Compress above N lines:
-                    <input type="number" id="es_compress_target" value="${settings.archiveCompressTarget}" min="50" max="5000" step="50" style="width: 80px;">
+                    Shorten the record when it passes (tokens):
+                    <input type="number" id="es_compress_target" value="${settings.recordCondenseTarget}" min="500" max="200000" step="500" style="width: 80px;">
                 </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>When the record grows past this, the model rewrites it shorter in one go, keeping the turning points and the time blocks. Nothing is dropped without the model deciding to drop it.</span>
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
@@ -2980,7 +2996,7 @@ function createUI() {
                 <button id="es_build_lorebook" class="enhanced-summary-btn">Build Lorebook</button>
                 <button id="es_stop" class="enhanced-summary-btn es-stop-btn" disabled>Stop</button>
                 <button id="es_clear_summary" class="enhanced-summary-btn">Clear Summary</button>
-                <button id="es_clear_chronicle" class="enhanced-summary-btn">Clear Chronicle</button>
+                <button id="es_clear_chronicle" class="enhanced-summary-btn">Clear Record</button>
                 <button id="es_clear_lorebook" class="enhanced-summary-btn">Clear Lorebook</button>
                 <button id="es_reabsorb_all" class="enhanced-summary-btn">Reset &amp; Re-absorb</button>
                 <button id="es_rollback" class="enhanced-summary-btn" disabled>Rollback Summary</button>
@@ -2990,11 +3006,12 @@ function createUI() {
                     Status: <span id="es_status">idle</span><br>
                     Coverage: <span id="es_coverage"></span><br>
                     Unarchived messages: <span id="es_msg_count">${getUnsummarizedMessages().length}</span> / triggers at ${settings.summarizeEvery}<br>
-                    Archived through message: <span id="es_watermark">${state.lastSummarizedIndex}</span><br>
-                    Archive lines: <span id="es_chronicle_count">${state.chronicle.length}</span><br>
-                    Lorebook processed through line: <span id="es_lb_progress">${state.lorebookProcessedUpTo}</span><br>
+                    Recorded through message: <span id="es_watermark">${state.lastSummarizedIndex}</span><br>
+                    Excluded from the prompt now: <span id="es_excluded_count">0</span><br>
+                    Record: <span id="es_record_count">${recordStats(state.record).blocks} blocks</span>, ~${formatTokens(recordStats(state.record).tokens)} tokens<br>
+                    Lorebook processed through block: <span id="es_lb_progress">${state.lorebookProcessedBlock + 1} / ${recordStats(state.record).blocks}</span><br>
                     Lorebook entries: <span id="es_lorebook_count">${Object.keys(state.lorebook).length}</span><br>
-                    Summary: <span id="es_summary_len">0</span> tokens estimated
+                    Story bible: <span id="es_summary_len">0</span> tokens estimated
                 </div>
             </div>
             <div class="enhanced-summary-row">
@@ -3011,16 +3028,16 @@ function createUI() {
                 </details>
             </div>
             <div class="enhanced-summary-row">
-                <details id="es_chronicle_row">
-                    <summary>View Archive</summary>
+                <details id="es_record_row">
+                    <summary>View Record</summary>
                     <div class="es-edit-row">
-                        <button id="es_chronicle_edit" class="enhanced-summary-btn es-edit-btn">Edit</button>
-                        <button id="es_chronicle_save" class="enhanced-summary-btn es-edit-btn" hidden>Save</button>
-                        <button id="es_chronicle_cancel" class="enhanced-summary-btn es-edit-btn" hidden>Cancel</button>
-                        <span class="es-note">One <code>[timestamp] line</code> per row. Saving sends the lorebook back to the start.</span>
+                        <button id="es_record_edit" class="enhanced-summary-btn es-edit-btn">Edit</button>
+                        <button id="es_record_save" class="enhanced-summary-btn es-edit-btn" hidden>Save</button>
+                        <button id="es_record_cancel" class="enhanced-summary-btn es-edit-btn" hidden>Cancel</button>
+                        <span class="es-note">The model writes this document. Saving it by hand sends the lorebook back to the start.</span>
                     </div>
-                    <div id="es_chronicle_view" class="enhanced-summary-view"></div>
-                    <textarea id="es_chronicle_edit_area" class="es-edit-area" rows="26" spellcheck="false" hidden></textarea>
+                    <div id="es_record_view" class="enhanced-summary-view"></div>
+                    <textarea id="es_record_edit_area" class="es-edit-area" rows="26" spellcheck="false" hidden></textarea>
                 </details>
             </div>
             <div class="enhanced-summary-row">
@@ -3072,11 +3089,11 @@ const EDIT_PANELS = {
         cancel: 'es_summary_cancel',
     },
     chronicle: {
-        area: 'es_chronicle_edit_area',
-        view: 'es_chronicle_view',
-        edit: 'es_chronicle_edit',
-        save: 'es_chronicle_save',
-        cancel: 'es_chronicle_cancel',
+        area: 'es_record_edit_area',
+        view: 'es_record_view',
+        edit: 'es_record_edit',
+        save: 'es_record_save',
+        cancel: 'es_record_cancel',
     },
 };
 
@@ -3099,7 +3116,7 @@ function beginEdit(kind) {
 
     panel.area.value = kind === 'summary'
         ? (state.summary || '')
-        : formatArchiveLines(state.chronicle);
+        : (state.record || '');
 
     editState[kind] = true;
     panel.area.hidden = false;
@@ -3148,18 +3165,23 @@ function saveEdit(kind) {
         setStatus('summary saved by hand');
         log('Summary edited by hand —', estimateTokens(text), 'tokens estimated');
     } else {
-        const entries = parseArchiveText(raw);
-        if (!entries.length) {
-            setStatus('the archive cannot be saved empty — cancel, or use Clear Chronicle instead');
+        const text = stripReasoning(raw).trim();
+        if (!text) {
+            setStatus('the record cannot be saved empty — cancel, or use Clear Record instead');
             return;
         }
-        pushSnapshot('before a hand-edited archive');
-        state.chronicle = entries;
-        // Line numbers moved, so the lorebook pass has to scan from the start.
-        state.lorebookProcessedUpTo = -1;
-        state.archiveRevision = (state.archiveRevision ?? 0) + 1;
-        setStatus(`archive saved by hand: ${entries.length} lines`);
-        log('Archive edited by hand —', entries.length, 'lines');
+        if (text === (state.record || '')) {
+            endEdit(kind);
+            setStatus('record unchanged');
+            return;
+        }
+        pushSnapshot('before a hand-edited record');
+        state.record = text;
+        // The blocks moved, so the lorebook has to scan from the start.
+        state.lorebookProcessedBlock = -1;
+        const stats = recordStats(text);
+        setStatus(`record saved by hand: ${stats.blocks} blocks, ~${stats.tokens} tokens`);
+        log('Record edited by hand —', stats.blocks, 'blocks,', stats.words, 'words');
     }
 
     saveSettingsNow();
@@ -3268,9 +3290,9 @@ function bindUIEvents() {
         saveSettingsDebounced();
     });
 
-    document.getElementById('es_chronicle_batch')?.addEventListener('change', (e) => {
-        settings.chronicleBatchSize = Math.max(5, Math.min(400, parseInt(e.target.value) || 30));
-        e.target.value = settings.chronicleBatchSize;
+    document.getElementById('es_record_batch')?.addEventListener('change', (e) => {
+        settings.recordBatchSize = Math.max(5, Math.min(400, parseInt(e.target.value) || 30));
+        e.target.value = settings.recordBatchSize;
         saveSettingsDebounced();
     });
 
@@ -3317,8 +3339,8 @@ function bindUIEvents() {
     bindBudget('es_inject_summary', 'injectSummaryTokens', 0, 60000, 4000);
     bindBudget('es_inject_lorebook', 'injectLorebookTokens', 0, 60000, 2000);
     bindBudget('es_inject_total', 'injectTotalTokens', 0, 200000, 24000);
-    bindBudget('es_stage2_archive', 'stage2ArchiveTokens', 500, 200000, 12000);
-    bindBudget('es_compress_target', 'archiveCompressTarget', 50, 5000, 600);
+    bindBudget('es_stage2_archive', 'stage2RecordTokens', 500, 200000, 12000);
+    bindBudget('es_compress_target', 'recordCondenseTarget', 500, 200000, 8192);
     bindBudget('es_recent_answer_tokens', 'recentAnswerTokens', 500, 100000, 6000);
     bindBudget('es_max_chat_states', 'maxChatStates', 1, 200, 20);
 
@@ -3409,36 +3431,37 @@ function bindUIEvents() {
     });
 
     document.getElementById('es_clear_summary')?.addEventListener('click', () => {
-        if (confirm('Clear this chat’s summary and un-absorb its messages? They will be archived again on the next run.')) {
+        if (confirm('Clear this chat’s story bible and release its messages? They will be recorded again on the next run.')) {
             unabsorbAllMessages();
             const state = getChatState();
             state.summary = '';
             state.summaryMessageId = -1;
             state.lastSummarizedIndex = -1;
-            state.chronicle = [];
-            state.lorebookProcessedUpTo = -1;
+            state.record = '';
+            state.recordCondensedAt = 0;
+            state.lorebookProcessedBlock = -1;
             saveSettingsNow();
             updateUI();
-            setStatus('summary cleared');
+            setStatus('story bible and record cleared');
         }
     });
 
     document.getElementById('es_clear_chronicle')?.addEventListener('click', () => {
-        if (confirm('Clear this chat’s archive? The summary is kept, but the lorebook can no longer process this history.')) {
+        if (confirm('Clear this chat’s record? The story bible is kept, but the lorebook can no longer process this history.')) {
             const state = getChatState();
-            state.chronicle = [];
-            state.chronicleCompressedAt = 0;
-            state.lorebookProcessedUpTo = -1;
+            state.record = '';
+            state.recordCondensedAt = 0;
+            state.lorebookProcessedBlock = -1;
             saveSettingsNow();
             updateUI();
         }
     });
 
     document.getElementById('es_clear_lorebook')?.addEventListener('click', () => {
-        if (confirm('Clear the lorebook and reset its progress? The archive is kept, so Build Lorebook can regenerate it from scratch.')) {
+        if (confirm('Clear the lorebook and reset its progress? The record is kept, so Build Lorebook can regenerate it from scratch.')) {
             const state = getChatState();
             state.lorebook = {};
-            state.lorebookProcessedUpTo = -1;
+            state.lorebookProcessedBlock = -1;
             saveSettingsNow();
             updateUI();
         }
@@ -3464,24 +3487,30 @@ function updateUI() {
     const msgCountEl = document.getElementById('es_msg_count');
     const summaryLenEl = document.getElementById('es_summary_len');
     const summaryViewEl = document.getElementById('es_summary_view');
-    const chronicleCountEl = document.getElementById('es_chronicle_count');
-    const chronicleViewEl = document.getElementById('es_chronicle_view');
+    const chronicleCountEl = document.getElementById('es_record_count');
+    const chronicleViewEl = document.getElementById('es_record_view');
     const lorebookCountEl = document.getElementById('es_lorebook_count');
     const lorebookViewEl = document.getElementById('es_lorebook_view');
     const watermarkEl = document.getElementById('es_watermark');
     const lbProgressEl = document.getElementById('es_lb_progress');
 
     const coverageEl = document.getElementById('es_coverage');
+    const excludedEl = document.getElementById('es_excluded_count');
+    const stats = recordStats(state.record);
+
     if (msgCountEl) msgCountEl.textContent = getUnsummarizedMessages().length;
     if (coverageEl) coverageEl.textContent = archiveCoverageText();
     if (summaryLenEl) summaryLenEl.textContent = estimateTokens(state.summary);
     // An open editor owns its text; refreshing the view under it would throw
     // away whatever is being typed.
-    if (summaryViewEl && !editState.summary) summaryViewEl.textContent = state.summary || 'No summary generated yet.';
+    if (summaryViewEl && !editState.summary) summaryViewEl.textContent = state.summary || 'No story bible yet.';
     if (watermarkEl) watermarkEl.textContent = state.lastSummarizedIndex;
-    if (lbProgressEl) lbProgressEl.textContent = state.lorebookProcessedUpTo;
-    if (chronicleCountEl) chronicleCountEl.textContent = state.chronicle.length;
-    if (chronicleViewEl && !editState.chronicle) chronicleViewEl.textContent = formatArchiveLines(state.chronicle) || 'No archive lines yet.';
+    // Shown because the flag lives in the chat file: a chat that says it recorded
+    // a thousand messages but excludes none of them is silently costing full price.
+    if (excludedEl) excludedEl.textContent = tokenStats().absorbedCount;
+    if (lbProgressEl) lbProgressEl.textContent = `${state.lorebookProcessedBlock + 1} / ${stats.blocks}`;
+    if (chronicleCountEl) chronicleCountEl.textContent = `${stats.blocks} blocks, ~${formatTokens(stats.tokens)} tokens`;
+    if (chronicleViewEl && !editState.chronicle) chronicleViewEl.textContent = state.record || 'The record is empty — run a summarization to write it.';
     if (lorebookCountEl) lorebookCountEl.textContent = Object.keys(state.lorebook).length;
     if (lorebookViewEl) lorebookViewEl.textContent = formatLorebookForDisplay() || 'No lorebook entries yet.';
 
@@ -3512,8 +3541,8 @@ function updateUI() {
             `Absorbed history: ${t.absorbedCount} messages, ~${formatTokens(t.absorbedTokens)} tokens`,
             `Left raw: ~${formatTokens(t.liveTokens)} tokens`,
             '',
-            `Chronological archive: ~${formatTokens(t.archiveTokens)} tokens (${state.chronicle.length} lines)`,
-            `Summary: ~${formatTokens(t.summaryTokens)} tokens`,
+            `Record: ~${formatTokens(t.archiveTokens)} tokens (${stats.blocks} blocks)`,
+            `Story bible: ~${formatTokens(t.summaryTokens)} tokens`,
             `Lorebook: ~${formatTokens(t.lorebookTokens)} tokens`,
             `Injected on every generation: ~${formatTokens(t.injectedTokens)} tokens`,
             '',
@@ -3522,7 +3551,7 @@ function updateUI() {
             `Change:  ${t.savedTokens >= 0 ? '-' : '+'}${formatTokens(Math.abs(t.savedTokens))} tokens (${Math.round((1 - t.ratio) * 100)}% of the original)`,
             `Ceiling: ~${formatTokens(settings.injectTotalTokens ?? 24000)} tokens injected in total`,
             t.beforeTokens > 0 && t.ratio > 0.5 && t.absorbedCount > 0
-                ? `COMPRESSION IS WEAKER THAN 2x (${(1 / Math.max(0.01, t.ratio)).toFixed(1)}x). To halve the chat: lower "Keep last N messages raw", or raise "Archive injected".`
+                ? `COMPRESSION IS WEAKER THAN 2x (${(1 / Math.max(0.01, t.ratio)).toFixed(1)}x). To halve the chat: lower "Keep last N messages raw", or raise "Record injected".`
                 : '',
             t.effectiveTokens > t.beforeTokens
                 ? 'NOTE: the injected material currently costs more than the history it replaced.'
@@ -3611,19 +3640,20 @@ function addSlashCommands() {
 
         parser.addCommand({
             name: 'clearsummary',
-            helpString: "Clear this chat's summary and un-absorb its messages",
+            helpString: "Clear this chat's record and story bible, and release its messages",
             callback: () => {
-                if (confirm("Clear this chat's summary and un-absorb its messages?")) {
+                if (confirm("Clear this chat's record and story bible, and release its messages?")) {
                     unabsorbAllMessages();
                     const state = getChatState();
                     state.summary = '';
                     state.summaryMessageId = -1;
                     state.lastSummarizedIndex = -1;
-                    state.chronicle = [];
-                    state.lorebookProcessedUpTo = -1;
+                    state.record = '';
+                    state.recordCondensedAt = 0;
+                    state.lorebookProcessedBlock = -1;
                     saveSettingsNow();
                     updateUI();
-                    return 'Summary cleared, all messages restored';
+                    return 'Record and story bible cleared, all messages restored';
                 }
                 return 'Cancelled';
             }
@@ -3653,11 +3683,11 @@ function addSlashCommands() {
 
         parser.addCommand({
             name: 'chronicle',
-            helpString: 'Search this chat’s archive',
+            helpString: 'Search this chat’s record',
             callback: (args) => {
                 const results = searchChronicle(args || '');
-                if (results.length === 0) return 'No matching archive lines found.';
-                return formatArchiveLines(results.slice(-100));
+                if (results.length === 0) return 'No matching block found in the record.';
+                return results.slice(-20).join('\n\n');
             }
         });
 
