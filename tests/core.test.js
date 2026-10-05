@@ -44,6 +44,7 @@ import {
     metaStamp,
     shouldDetectHeaders,
     formatMessagesForArchive,
+    verifyChronicleCoverage,
     stripHeaders,
     countExchanges,
     SUMMARIZED_FLAG,
@@ -815,16 +816,74 @@ test('formatMessagesForArchive hands the model real stamps and places', () => {
         },
     ];
     const out = formatMessagesForArchive(msgs, { useHeaders: true });
-    assert.match(out, /#0\nUser: Where are we going\?/);
-    assert.match(out, /#1 \| July 13, 2025 8:31 AM \| Front porch/);
+    assert.match(out, /\[#0 · exchange 1 · user\]/);
+    assert.match(out, /User: Where are we going\?/);
+    assert.match(out, /\[#1 · exchange 1 · reply\] July 13, 2025 8:31 AM \| Front porch/);
     assert.ok(!out.includes('Weather:'), 'the header itself must not be repeated in the body');
     assert.match(out, /Rebecca leaned on the rail/);
+});
+
+test('formatMessagesForArchive indexes the exchange each message belongs to', () => {
+    // The model has to see which reply answers which request, and the opening
+    // message has no request before it and must not look like a reply.
+    const out = formatMessagesForArchive([
+        { is_user: false, mes: 'The rain had stopped by the time she reached the pier.' },
+        { is_user: true, mes: 'You came.' },
+        { is_user: false, mes: 'I said I would.' },
+        { is_user: true, mes: 'Then sit.' },
+        { is_user: false, mes: 'He sat.' },
+    ], { useHeaders: false, startIndex: 40 });
+
+    assert.match(out, /\[#40 · exchange 0 · opening\]/);
+    assert.match(out, /\[#41 · exchange 1 · user\]/);
+    assert.match(out, /\[#42 · exchange 1 · reply\]/);
+    assert.match(out, /\[#43 · exchange 2 · user\]/);
+    assert.match(out, /\[#44 · exchange 2 · reply\]/);
+    assert.equal((out.match(/opening/g) || []).length, 1, 'only the first message opens the conversation');
+});
+
+test('the record can prove it covered every message it was given', () => {
+    // Counting lines cannot tell a merged pair from a dropped one. The indices
+    // can, and they name the message that went missing.
+    const text = [
+        '[July 13, 2025 8:31 AM] [#40] Name arrived at the pier.',
+        '[July 13, 2025 8:33 AM] [#42] Name answered that she had waited.',
+    ].join('\n');
+
+    const parsed = parseChronicleBlock(text);
+    assert.equal(parsed.entries[0].id, '40');
+    assert.equal(parsed.entries[1].id, '42');
+
+    const gap = verifyChronicleCoverage(parsed.entries, ['40', '41', '42']);
+    assert.equal(gap.checked, true);
+    assert.equal(gap.ok, false);
+    assert.deepEqual(gap.missing, ['41'], 'the missing index names the lost message');
+    assert.equal(gap.ratio.toFixed(2), '0.67');
+
+    const whole = verifyChronicleCoverage(parsed.entries, ['40', '42']);
+    assert.equal(whole.ok, true);
+    assert.equal(whole.ratio, 1);
+
+    const repeated = verifyChronicleCoverage(parsed.entries.concat([{ ts: '', id: '42', text: 'again' }]), ['40', '42']);
+    assert.equal(repeated.ok, false);
+    assert.deepEqual(repeated.duplicated, ['42']);
+
+    assert.equal(verifyChronicleCoverage(parsed.entries, []).checked, false, 'no input, nothing to check');
+});
+
+test('a record line that keeps its index but loses its stamp is still kept', () => {
+    // Dropping it would hide a gap in the coverage instead of showing it.
+    const parsed = parseChronicleBlock('[#7] Name said something without a timestamp.');
+    assert.equal(parsed.entries.length, 1);
+    assert.equal(parsed.entries[0].id, '7');
+    assert.equal(parsed.entries[0].ts, '');
 });
 
 test('formatMessagesForArchive can leave the header inline when disabled', () => {
     const msgs = [{ is_user: false, mes: 'Date: July 13, 2025\nLocation: Pier\n\nBody.' }];
     const out = formatMessagesForArchive(msgs, { useHeaders: false });
-    assert.match(out, /#0\nAssistant: Date: July 13, 2025/);
+    assert.match(out, /\[#0 · exchange 0 · opening\]/);
+    assert.match(out, /Assistant: Date: July 13, 2025/);
 });
 
 test('stripHeaders removes the block but keeps the message intact otherwise', () => {
@@ -1404,6 +1463,33 @@ test('reasoning streamed in its own frames is recognised as reasoning', () => {
     const r = extractStreamText(body);
     assert.equal(r.text, '');
     assert.match(r.reasoning, /thinking hard/);
+});
+
+test('a reset is written to disk at once, not on the debounce', async () => {
+    // A queued reset dies with the page. The reload brings back the old watermark
+    // and the old archive, and the next run then summarizes only what arrived
+    // after the last one — which looks exactly like the reset never happened.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /import \{ saveSettings, saveSettingsDebounced,/,
+        'the immediate save has to be imported');
+    assert.match(src, /function saveSettingsNow\(\)/);
+
+    const lines = src.split('\n');
+    const critical = [
+        ['resetStateForRebuild', /EMPTY_CHAT_STATE/],
+        ['reabsorb', /Object\.assign\(state, EMPTY_CHAT_STATE\(\)\)/],
+        ['clear summary', /state\.chronicle = \[\];/],
+        ['clear lorebook', /state\.lorebook = \{\};/],
+    ];
+
+    for (const [what, marker] of critical) {
+        const at = lines.findIndex((line, i) => marker.test(line) &&
+            lines.slice(i, i + 6).some(l => /saveSettings/.test(l)));
+        assert.ok(at >= 0, `${what} must save its state`);
+        const window = lines.slice(at, at + 6).join('\n');
+        assert.ok(/saveSettingsNow\(\)/.test(window),
+            `${what} writes through immediately so a reload cannot undo it`);
+    }
 });
 
 test('countExchanges counts user turns and never returns zero', () => {

@@ -31,9 +31,14 @@ SillyTavern.
 ## How it works
 
 1. **Archive.** Everything older than the raw tail is sent to the model in
-   batches, one line per message, and validated before it is committed. A batch
-   that refuses, rambles or loses timestamps is rejected and retried, so the
-   watermark never advances over history that was not recorded.
+   batches and validated before it is committed. Every message arrives numbered
+   and labelled with the exchange it belongs to (`[#42 · exchange 21 · reply]`),
+   so the model can see which reply answers which request, and the opening
+   message is marked as the one with no request before it. The record has to bring
+   every one of those numbers back: a batch that drops more than a fifth of its
+   messages is rejected rather than committed, because a message the record skips
+   is lost from the prompt and the record at once. A refusal, prose without
+   timestamps or a missing index holds the watermark where it is.
 2. **Exclude.** Absorbed messages are marked with SillyTavern's own
    `is_system` flag — the same one its *Exclude message from prompts* button
    uses. The prompt builder drops them, the chat keeps them in full, and any
@@ -56,7 +61,8 @@ SillyTavern.
 
 | Setting | What it does |
 | --- | --- |
-| Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. |
+| Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. This is the biggest lever on how hard the chat compresses. |
+| Everything injected, hard ceiling | The one number that decides the size of every request. The state the model acts on is kept first, the world facts are sacrificed first. |
 | Archive when N unarchived messages accumulate | The auto-trigger for a run. |
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
@@ -69,6 +75,9 @@ SillyTavern.
 
 Slash commands: `/summarize`, `/clearsummary`, `/buildlorebook`, `/stop`,
 `/chronicle <search>`, `/lorebook <search>`.
+
+The Context budget panel shows what the compression actually bought, including
+whether it reached 2x, and says which knob to turn when it did not.
 
 ## When a run misbehaves
 

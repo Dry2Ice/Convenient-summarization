@@ -1,5 +1,5 @@
 import { extension_settings } from '../../../extensions.js';
-import { saveSettingsDebounced, generateQuietPrompt, eventSource, event_types, cancelStatusCheck, getRequestHeaders } from '../../../../script.js';
+import { saveSettings, saveSettingsDebounced, generateQuietPrompt, eventSource, event_types, cancelStatusCheck, getRequestHeaders } from '../../../../script.js';
 import {
     SUMMARIZED_FLAG,
     ORIGINAL_MES_KEY,
@@ -12,6 +12,7 @@ import {
     describeEmptyAnswer,
     fitStage2Budgets,
     looksTruncatedRevision,
+    verifyChronicleCoverage,
     reconcileWatermark,
     formatMessages,
     perMessageCharLimit,
@@ -92,6 +93,7 @@ const DEFAULT_SETTINGS = {
     injectArchiveTokens: 3000,
     injectSummaryTokens: 4000,
     injectLorebookTokens: 2000,
+    injectTotalTokens: 24000,
     stage2ArchiveTokens: 12000,
     autoCompressArchive: true,
     archiveCompressTarget: 600,
@@ -529,30 +531,39 @@ const CHRONICLE_PROMPT_TEMPLATE = `You are a chronological archivist. Do NOT rol
 
 Convert the conversation excerpt below into a compact chronological record.
 
+The excerpt arrives INDEXED. Every line starts with \`[#42 · exchange 21 · reply]\`, which tells you the
+message number, which request-and-answer exchange it belongs to, and whether it is a request, a reply or
+the opening message (the one with no request before it — there is only ever one, and it stands alone).
+
 RULES:
 - Process EVERY message in order. Do not skip any and do not summarize the whole thing at once.
-- ONE LINE PER MESSAGE. Every message gets its own line. A user turn and the assistant turn that follows it are TWO separate messages and therefore TWO separate lines. Do NOT merge them.
+- ONE OUTPUT LINE PER INPUT LINE. Every \`[#n]\` you are given gets exactly one line back, carrying that same
+  \`[#n]\` verbatim. A request and the reply that answers it are TWO lines with TWO different numbers. Never
+  merge them, never drop one, never invent a number that was not in the excerpt.
 - {{time_rule}}
 - {{day_hint}}
-- After the timestamp, name who acted (use names, not "User"/"Assistant").
-- Then describe what actually happened in 1 sentence, factually. No adjectives, no interpretation, no "they talked about".
+- After the timestamp and the index, name who acted (use names, not "User"/"Assistant").
+- Then write what actually happened, factually: no adjectives, no interpretation, no "they talked about".
+- A line may be a full short sentence, up to about two clauses. That room is deliberate: a fact squeezed out
+  here is gone for good. Put in who did it, what was said or decided, and anything irreversible.
 - If something irreversible happens (a decision, a death, a reveal, a departure, a discovery), state it plainly.
-- Do NOT merge multiple exchanges into one line. Do NOT drop exchanges to save space.
+- If a request sets something up and the reply answers it, each line says its own half — the reader must be
+  able to follow the causality from one line to the next without the original text.
 - Preserve exact names, places, and objects as written.
 
 SCOPE — this record is the factual spine of the story, and nothing else:
-- Write ONLY what was said, done, decided, revealed or promised. One short clause is enough.
+- Write ONLY what was said, done, decided, revealed or promised.
 - NO feelings, NO impressions, NO subtext, NO "seemed tense", NO tone, NO interpretation.
   Everything about what things MEANT is written in the separate summary; putting it here
   would duplicate that work and cost tokens twice.
-- Keep the line to the event. If a line still makes sense once the emotional layer is
-  written elsewhere, it belongs here.
+- If a line still makes sense once the emotional layer is written elsewhere, it belongs here.
 
 FORMAT — one line per message, nothing else, in this exact shape:
-[July 12, 2025 1:15 PM] Name did X.
-[July 12, 2025 1:17 PM] Name responded Y.
+[July 12, 2025 1:15 PM] [#42] Name suggested meeting at the boathouse and named the time.
+[July 12, 2025 1:17 PM] [#43] Name agreed, warned her about the current, and took the oars.
 
-If real timestamps were supplied, copy the date and time exactly as given, including the real month name, and mention the place when the scene moves. If they were not, use [Day 1 09:12].
+If real timestamps were supplied, copy the date and time exactly as given, including the real month name, and
+mention the place when the scene moves. If they were not, use [Day 1 09:12].
 
 Now output the record.
 
@@ -560,7 +571,7 @@ Now output the record.
 {{new_messages}}
 === END EXCERPT ===
 
-Output only the timestamped lines.`;
+Output only the timestamped lines, every one of them carrying its [#n].`;
 
 const SUMMARY_STAGE2_FRAMING = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
 
@@ -758,11 +769,31 @@ function initSettings() {
 
     settings.isSummarizing = false;
     settings.isLorebooking = false;
-    saveSettingsDebounced();
+    saveSettingsNow();
 }
 
 function getSettings() {
     return extension_settings[MODULE_NAME];
+}
+
+/**
+ * Write the settings to disk now instead of on the debounce.
+ *
+ * A reset that is only queued dies with the page: the reload brings back the old
+ * watermark and the old archive, so the next run summarizes only the messages
+ * that arrived after the last one, exactly as if the reset never happened. Every
+ * destructive change therefore saves immediately, and so does the end of a run.
+ */
+function saveSettingsNow() {
+    saveSettingsDebounced();
+    try {
+        const pending = saveSettings();
+        if (pending && typeof pending.catch === 'function') {
+            pending.catch(() => { /* the debounced save is still queued */ });
+        }
+    } catch (e) {
+        log('could not save the settings right away:', e?.message || e);
+    }
 }
 
 function log(...args) {
@@ -1396,7 +1427,7 @@ function rollbackSummary() {
     history.pop();
     state.snapshots = history;
 
-    saveSettingsDebounced();
+    saveSettingsNow();
     updateUI();
     return `Rolled back to the summarization from ${new Date(snap.at).toLocaleTimeString()}. ${snap.chronicle.length} archive lines, watermark at ${snap.lastSummarizedIndex}.`;
 }
@@ -1732,11 +1763,19 @@ async function generateSummary() {
             const remaining = pending.length - cursor;
             const totalBatches = Math.ceil(remaining / batchSize);
             const expected = batch.length;
+            // The absolute numbers of the messages in this batch, so the record
+            // can be checked against the input rather than against a line count.
+            const firstIdx = Math.max(0, chat.indexOf(batch[0]));
+            const batchIds = batch.map((_, i) => String(firstIdx + i));
             setStatus(`stage 1/2: batch ${batchNo}/${totalBatches} (${expected} messages)...`);
 
             const hasHeaders = useHeaders(batch);
             const chronPrompt = guardrail() + buildSummaryPrompt(CHRONICLE_PROMPT_TEMPLATE, {
-                '{{new_messages}}': formatMessagesForArchive(batch, { maxChars: perBatchChars, useHeaders: hasHeaders }),
+                '{{new_messages}}': formatMessagesForArchive(batch, {
+                    maxChars: perBatchChars,
+                    useHeaders: hasHeaders,
+                    startIndex: firstIdx,
+                }),
                 '{{part_label}}': remaining > batchSize ? `This is part ${batchNo}, in chronological order.` : '',
                 '{{day_hint}}': batchNo > 1
                     ? (hasHeaders
@@ -1756,10 +1795,30 @@ async function generateSummary() {
             const parsed = parseChronicleBlock(chronText);
             const verdict = validateChronicleResponse(parsed, expected);
 
-            // Nothing usable at all is always a hard stop: the watermark must not
-            // move over messages we recorded nothing about.
+            // Every message that went in has to come back, or the record claims
+            // to cover history it silently skipped. Counting lines cannot show
+            // which message was lost; the indices the model was given can.
+            const coverage = verifyChronicleCoverage(parsed.entries, batchIds);
+            if (coverage.checked && !coverage.ok) {
+                const lost = coverage.missing.slice(0, 8).map(id => `#${id}`).join(', ') +
+                    (coverage.missing.length > 8 ? `, +${coverage.missing.length - 8} more` : '');
+                verdict.problems.push(
+                    `the record does not cover ${coverage.missing.length} of ${expected} messages (${lost})` +
+                    (coverage.duplicated.length ? `, and repeats ${coverage.duplicated.length}` : ''));
+                verdict.ok = false;
+                log('Coverage gap: missing', coverage.missing.join(','),
+                    '| duplicated', coverage.duplicated.join(',') || 'none',
+                    '| invented', coverage.extra.join(',') || 'none');
+            }
+
+            // A record that skips messages is a record that will never be
+            // rewritten: the watermark moves past them and they are gone from
+            // both the prompt and the record. Losing more than a fifth of a batch
+            // is a failed batch, not a rough one.
+            const coverageFloor = settings.strictArchive ? 1 : 0.8;
             const nothingUsable = parsed.entries.length === 0;
-            const rejected = nothingUsable || (settings.strictArchive && !verdict.ok);
+            const coverageTooThin = coverage.checked && coverage.ratio < coverageFloor;
+            const rejected = nothingUsable || coverageTooThin || (settings.strictArchive && !verdict.ok);
 
             if (rejected) {
                 const why = verdict.problems.join('; ');
@@ -1794,7 +1853,7 @@ async function generateSummary() {
                     if (chat[i] && !chat[i].is_system) chat[i][SUMMARIZED_FLAG] = true;
                 }
                 state.lastSummarizedIndex = lastIdx;
-                saveSettingsDebounced();
+                saveSettingsNow();
                 // Hide now, not at prompt time: the request is assembled from
                 // context.chat before any prompt-ready event can be observed.
                 applyHidingEagerly();
@@ -1919,7 +1978,7 @@ async function generateSummary() {
             state.summary = trimmed;
             state.summaryMessageId = chat.length - 1;
             state.messageCountSinceSummary = 0;
-            saveSettingsDebounced();
+            saveSettingsNow();
             const previous = getSnapshots().length
                 ? getSnapshots()[getSnapshots().length - 1]
                 : null;
@@ -1953,7 +2012,7 @@ async function generateSummary() {
     } finally {
         activeRun = null;
         settings.isSummarizing = false;
-        saveSettingsDebounced();
+        saveSettingsNow();
         updateUI();
     }
 }
@@ -2064,7 +2123,7 @@ async function rebuildLorebook() {
     } finally {
         activeRun = null;
         settings.isLorebooking = false;
-        saveSettingsDebounced();
+        saveSettingsNow();
         updateUI();
     }
 }
@@ -2142,10 +2201,19 @@ function injectIntoPrompt(eventData) {
     const summary = state.summary || '';
     const recentText = getRecentMessages().map(m => m.mes).join('\n');
 
+    // One ceiling for everything this extension injects, because three separate
+    // budgets add up to a number nobody chose. The order of sacrifice is fixed and
+    // stated: the state the model has to act on survives, the world facts go
+    // first, and the archive lines in between.
+    const ceiling = Math.max(0, settings.injectTotalTokens ?? 24000);
+    let remaining = ceiling;
+    const spend = (text) => { remaining -= estimateTokens(text); };
+
     // Before the history: what happened. The archive is the factual spine, one
-    // line per message, so nothing here repeats what it already says.
+    // line per indexed message, so nothing here repeats what it already says.
     const coreMemories = extractSection(summary, 'Core Memories');
-    const archive = archiveWithinBudget(settings.injectArchiveTokens);
+    spend(coreMemories);
+    const archive = archiveWithinBudget(Math.min(settings.injectArchiveTokens, Math.max(0, remaining)));
 
     let before = '';
     if (coreMemories) before += `### Core Memories\n${coreMemories}\n\n`;
@@ -2155,6 +2223,7 @@ function injectIntoPrompt(eventData) {
             before += `_(${archive.dropped} older archived lines omitted for length.)_\n\n`;
         }
     }
+    spend(archive.lines.length ? formatArchiveLines(archive.lines) : '');
 
     // After the history: everything the archive cannot hold — the state, the
     // feelings, the motives, what is still unresolved, and the world facts.
@@ -2181,8 +2250,12 @@ function injectIntoPrompt(eventData) {
         if (trimmed.dropped) after += `_(${trimmed.dropped} lines of state detail omitted for length.)_\n\n`;
         log('State block trimmed to fit budget, dropped', trimmed.dropped, 'lines');
     }
+    spend(after);
 
-    const loreBudget = Math.max(0, settings.injectLorebookTokens - estimateTokens(after));
+    const loreBudget = Math.max(0, Math.min(
+        settings.injectLorebookTokens - estimateTokens(after),
+        remaining,
+    ));
     const lore = selectLorebook(getLorebookEntries(), recentText, loreBudget);
     if (lore.entries.length) {
         after += '### Established World Facts\n' + lore.entries
@@ -2212,7 +2285,12 @@ function injectIntoPrompt(eventData) {
 
     const totalBefore = estimateTokens(before);
     const totalAfter = estimateTokens(after);
-    log('Injected ~' + totalBefore + ' tokens of history and ~' + totalAfter + ' tokens of current state');
+    const injected = totalBefore + totalAfter;
+    log('Injected ~' + totalBefore + ' tokens of history and ~' + totalAfter + ' tokens of current state' +
+        (injected > ceiling ? ` — OVER the ${ceiling} ceiling` : ` (ceiling ${ceiling})`));
+    if (injected > ceiling) {
+        log('WARNING: the injected material is still above the ceiling; lower Archive injected or Lorebook injected');
+    }
 }
 
 /**
@@ -2542,7 +2620,7 @@ function resetStateForRebuild(reason) {
     // watermark restarts at zero, skipped by the rebuild that follows.
     unabsorbAllMessages();
     Object.assign(state, EMPTY_CHAT_STATE(), { touchedAt: Date.now() });
-    saveSettingsDebounced();
+    saveSettingsNow();
     setStatus('archive reset (' + reason + ') — it will be rebuilt from the chat');
     updateUI();
 }
@@ -2701,6 +2779,15 @@ function createUI() {
                     Lorebook injected:
                     <input type="number" id="es_inject_lorebook" value="${settings.injectLorebookTokens}" min="0" max="60000" step="250" style="width: 90px;">
                 </label>
+            </div>
+            <div class="enhanced-summary-row">
+                <label class="enhanced-summary-label">
+                    Everything injected, hard ceiling:
+                    <input type="number" id="es_inject_total" value="${settings.injectTotalTokens}" min="0" max="200000" step="1000" style="width: 90px;">
+                </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>The one number that decides the size of every request. The state the model acts on is kept first, the world facts are sacrificed first.</span>
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
@@ -2987,7 +3074,7 @@ function saveEdit(kind) {
         log('Archive edited by hand —', entries.length, 'lines');
     }
 
-    saveSettingsDebounced();
+    saveSettingsNow();
     endEdit(kind);
     updateUI();
 }
@@ -3043,7 +3130,7 @@ function bindUIEvents() {
         unabsorbAllMessages();
         const state = getChatState();
         Object.assign(state, EMPTY_CHAT_STATE());
-        saveSettingsDebounced();
+        saveSettingsNow();
         updateUI();
         setStatus('reset — this chat will be archived again from scratch');
     });
@@ -3135,6 +3222,7 @@ function bindUIEvents() {
     bindBudget('es_inject_archive', 'injectArchiveTokens', 0, 60000, 3000);
     bindBudget('es_inject_summary', 'injectSummaryTokens', 0, 60000, 4000);
     bindBudget('es_inject_lorebook', 'injectLorebookTokens', 0, 60000, 2000);
+    bindBudget('es_inject_total', 'injectTotalTokens', 0, 200000, 24000);
     bindBudget('es_stage2_archive', 'stage2ArchiveTokens', 500, 200000, 12000);
     bindBudget('es_compress_target', 'archiveCompressTarget', 50, 5000, 600);
     bindBudget('es_recent_answer_tokens', 'recentAnswerTokens', 500, 100000, 6000);
@@ -3235,7 +3323,7 @@ function bindUIEvents() {
             state.lastSummarizedIndex = -1;
             state.chronicle = [];
             state.lorebookProcessedUpTo = -1;
-            saveSettingsDebounced();
+            saveSettingsNow();
             updateUI();
             setStatus('summary cleared');
         }
@@ -3247,7 +3335,7 @@ function bindUIEvents() {
             state.chronicle = [];
             state.chronicleCompressedAt = 0;
             state.lorebookProcessedUpTo = -1;
-            saveSettingsDebounced();
+            saveSettingsNow();
             updateUI();
         }
     });
@@ -3257,7 +3345,7 @@ function bindUIEvents() {
             const state = getChatState();
             state.lorebook = {};
             state.lorebookProcessedUpTo = -1;
-            saveSettingsDebounced();
+            saveSettingsNow();
             updateUI();
         }
     });
@@ -3338,6 +3426,10 @@ function updateUI() {
             `Before: ~${formatTokens(t.beforeTokens)} tokens`,
             `Now:     ~${formatTokens(t.effectiveTokens)} tokens`,
             `Change:  ${t.savedTokens >= 0 ? '-' : '+'}${formatTokens(Math.abs(t.savedTokens))} tokens (${Math.round((1 - t.ratio) * 100)}% of the original)`,
+            `Ceiling: ~${formatTokens(settings.injectTotalTokens ?? 24000)} tokens injected in total`,
+            t.beforeTokens > 0 && t.ratio > 0.5 && t.absorbedCount > 0
+                ? `COMPRESSION IS WEAKER THAN 2x (${(1 / Math.max(0.01, t.ratio)).toFixed(1)}x). To halve the chat: lower "Keep last N messages raw", or raise "Archive injected".`
+                : '',
             t.effectiveTokens > t.beforeTokens
                 ? 'NOTE: the injected material currently costs more than the history it replaced.'
                 : '',        ].filter(Boolean).join('\n');
@@ -3435,7 +3527,7 @@ function addSlashCommands() {
                     state.lastSummarizedIndex = -1;
                     state.chronicle = [];
                     state.lorebookProcessedUpTo = -1;
-                    saveSettingsDebounced();
+                    saveSettingsNow();
                     updateUI();
                     return 'Summary cleared, all messages restored';
                 }

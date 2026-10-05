@@ -73,31 +73,79 @@ export function parseChronicleBlock(text, { allowUndated = false } = {}) {
         // would ever match.
         const bracket = stripped.match(/^\s*[[(]\s*([^)\]]{1,64}?)\s*[\])]\s*(.*)$/);
         if (bracket && isTimestampLabel(bracket[1])) {
-            const body = bracket[2].trim();
-            if (body) {
+            const { id, text } = splitChronicleId(bracket[2].trim());
+            if (text) {
                 datedCount++;
-                entries.push({ ts: bracket[1].trim(), text: body });
+                entries.push({ ts: bracket[1].trim(), id, text });
                 continue;
             }
         }
 
         const m = stripped.match(lineRe);
         if (!m) {
-            if (allowUndated) entries.push({ ts: '', text: stripped });
+            // A line that carries an index but no stamp is still a record of
+            // that message: dropping it would hide a gap in the coverage.
+            const undated = splitChronicleId(stripped);
+            if (allowUndated || undated.id) entries.push({ ts: '', id: undated.id, text: undated.text || stripped });
             continue;
         }
 
         const day = m[1] ? `Day ${m[1]}` : '';
         const time = m[2] || m[3] || m[4] || '';
         const ts = [day, time].filter(Boolean).join(' ');
-        const body = (m[5] || '').trim();
-        if (!body) continue;
+        const { id, text } = splitChronicleId((m[5] || '').trim());
+        if (!text) continue;
 
         datedCount++;
-        entries.push({ ts, text: body });
+        entries.push({ ts, id, text });
     }
 
     return { entries, datedCount, totalNonEmpty };
+}
+
+/**
+ * Pull the index off the front of a record line, so a line can be traced back
+ * to the message it came from.
+ *
+ * The `#` is optional because emphasis stripping runs before this and removes it:
+ * the line is matched for coverage either way, and dropping a line because its
+ * index lost a character would hide the gap this exists to show.
+ */
+function splitChronicleId(body) {
+    const m = String(body ?? '').match(/^\s*\[#?\s*(\d{1,6})\]\s*(.*)$/);
+    if (!m) return { id: '', text: String(body ?? '').trim() };
+    return { id: m[1], text: m[2].trim() };
+}
+
+/**
+ * Which of the given messages the record actually covers.
+ *
+ * Counting lines cannot tell "the model merged two messages" from "the model
+ * dropped one". Indices can: every input line carries its number and has to come
+ * back, so a missing number names the message that was lost.
+ */
+export function verifyChronicleCoverage(entries, expectedIds) {
+    const expected = (expectedIds || []).map(id => String(id));
+    if (!expected.length) return { checked: false, ok: true, missing: [], duplicated: [], extra: [], ratio: 1 };
+
+    const counts = new Map();
+    for (const entry of entries || []) {
+        if (!entry?.id) continue;
+        counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+    }
+
+    const missing = expected.filter(id => !counts.has(id));
+    const duplicated = [...counts.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+    const extra = [...counts.keys()].filter(id => !expected.includes(id));
+
+    return {
+        checked: true,
+        ok: !missing.length && !duplicated.length,
+        missing,
+        duplicated,
+        extra,
+        ratio: (expected.length - missing.length) / expected.length,
+    };
 }
 
 /**
@@ -931,25 +979,39 @@ export function shouldDetectHeaders(messages) {
 /**
  * Format messages for the archivist, handing it the real date, time and place
  * from each header instead of leaving it to invent them.
+ *
+ * Every line is indexed and labelled with the exchange it belongs to, so the
+ * model can see which reply answers which request — and an opening message,
+ * which has no request before it, is marked as such instead of looking like a
+ * reply to nothing. The index is also what the record has to bring back.
  */
-export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true } = {}) {
-    return (messages || [])
-        .filter(m => m && !m.is_system)
-        .map((m, i) => {
-            const role = m.is_user ? 'User' : 'Assistant';
-            const name = m.name ? ` (${m.name})` : '';
-            const parsed = useHeaders ? parseMessageHeader(m.mes) : { found: false, meta: {}, body: m.mes };
-            const { text } = truncateForPrompt(parsed.body, maxChars);
+export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true, startIndex = 0 } = {}) {
+    const list = (messages || []).filter(m => m && !m.is_system);
+    let exchange = 0;
+    let awaitingReply = false;
 
-            const bits = [];
-            const stamp = metaStamp(parsed.meta);
-            if (stamp) bits.push(stamp);
-            if (parsed.meta.location) bits.push(parsed.meta.location);
-            const head = bits.length ? `#${i} | ${bits.join(' | ')}` : `#${i}`;
+    return list.map((m, i) => {
+        const isUser = Boolean(m.is_user);
+        if (isUser) {
+            exchange++;
+            awaitingReply = true;
+        }
+        // An assistant turn with no request before it opens the conversation.
+        const role = isUser ? 'user' : (exchange === 0 ? 'opening' : (awaitingReply ? 'reply' : 'extra'));
+        if (!isUser) awaitingReply = false;
 
-            return `${head}\n${role}${name}: ${text}`;
-        })
-        .join('\n\n');
+        const name = m.name ? ` (${m.name})` : '';
+        const parsed = useHeaders ? parseMessageHeader(m.mes) : { found: false, meta: {}, body: m.mes };
+        const { text } = truncateForPrompt(parsed.body, maxChars);
+
+        const bits = [];
+        const stamp = metaStamp(parsed.meta);
+        if (stamp) bits.push(stamp);
+        if (parsed.meta.location) bits.push(parsed.meta.location);
+        const head = bits.length ? `${bits.join(' | ')} | ` : '';
+
+        return `[#${startIndex + i} · exchange ${exchange} · ${role}] ${head}\n${isUser ? 'User' : 'Assistant'}${name}: ${text}`;
+    }).join('\n\n');
 }
 
 /** Remove headers from a batch of messages without otherwise altering them. */
