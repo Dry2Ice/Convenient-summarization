@@ -13,10 +13,10 @@ import {
     fitStage2Budgets,
     looksTruncatedRevision,
     verifyChronicleCoverage,
+    chronologyBreaks,
     reconcileWatermark,
     formatMessages,
     perMessageCharLimit,
-    sortArchiveLines,
     pruneChatStates,
     chatStateKey,
     computeTokenStats,
@@ -24,6 +24,8 @@ import {
     countCoreMemories,
     looksLikeRefusal,
     shouldDetectHeaders,
+    parseMessageHeader,
+    metaStamp,
     formatMessagesForArchive,
     stripHeaders,
     estimateTokens,
@@ -75,7 +77,8 @@ const DEFAULT_SETTINGS = {
     summarizeEvery: 30,
     keepLastMessages: 10,
     hideMessagesFromAI: true,
-    summaryTemperature: 0.7,
+    summaryTemperature: 0.6,
+    summaryTopP: 0.8,
     summaryMaxTokens: 4096,
     summaryPrompt: '',
     debugMode: false,
@@ -543,6 +546,12 @@ RULES:
 - Then write what actually happened, factually: no adjectives, no interpretation, no "they talked about".
 - A line may be a full short sentence, up to about two clauses. That room is deliberate: a fact squeezed out
   here is gone for good. Put in who did it, what was said or decided, and anything irreversible.
+- If a message contains an EMBEDDED exchange — a text conversation, quoted messages, a transcript, a phone
+  screen, a chat log inside the message — record WHAT WAS SAID AND DONE IN IT. Never record the act of
+  typing, sending, reading, replying or stopping: "he typed a message" is not an event, "he asked her to
+  come to the boathouse at nine" is. The same goes for narration of the messenger itself.
+- If a message is only an action line, a gesture, a reaction or a fragment with no content, say what it
+  changed, not that it happened.
 - If something irreversible happens (a decision, a death, a reveal, a departure, a discovery), state it plainly.
 - If a request sets something up and the reply answers it, each line says its own half — the reader must be
   able to follow the causality from one line to the next without the original text.
@@ -936,12 +945,23 @@ function formatArchiveLines(lines) {
 function appendChronicleBlock(entries) {
     const state = getChatState();
     if (!Array.isArray(state.chronicle)) state.chronicle = [];
+
+    // Appended in the order the messages happened, never re-sorted. Sorting the
+    // record by a clock the model wrote would reorder real history whenever it
+    // invented, reset or copied a time wrong, and a story that jumps around is
+    // far more damaging than one with an approximate stamp.
+    const previous = state.chronicle[state.chronicle.length - 1] || null;
     for (const p of entries) {
-        state.chronicle.push({ ts: p.ts, text: p.text });
+        state.chronicle.push({ ts: p.ts, id: p.id || '', text: p.text });
     }
-    // A model that restarts its day counter mid-run would otherwise leave the
-    // record out of order, and the "continue the clock" hints depend on order.
-    state.chronicle = sortArchiveLines(state.chronicle);
+
+    const breaks = chronologyBreaks(entries, previous);
+    if (breaks.length) {
+        log('WARNING: ' + breaks.length + ' line(s) go backwards in time (e.g. "' +
+            breaks[0].from + '" then "' + breaks[0].to + '"). The order was kept as written; ' +
+            'check the message headers if the stamps are supposed to be real.');
+    }
+
     saveSettingsDebounced();
     log('Archive lines appended:', entries.length, 'total:', state.chronicle.length);
     return entries.length;
@@ -1046,6 +1066,7 @@ async function callCustomAPI(prompt, settings) {
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: settings.summaryTemperature,
+            top_p: settings.summaryTopP,
             max_tokens: settings.summaryMaxTokens,
         };
     } else if (apiType === 'anthropic') {
@@ -1059,6 +1080,7 @@ async function callCustomAPI(prompt, settings) {
             model: model,
             messages: [{ role: 'user', content: prompt }],
             temperature: settings.summaryTemperature,
+            top_p: settings.summaryTopP,
             max_tokens: settings.summaryMaxTokens,
         };
     } else if (apiType === 'ollama') {
@@ -1070,6 +1092,7 @@ async function callCustomAPI(prompt, settings) {
             stream: false,
             options: {
                 temperature: settings.summaryTemperature,
+                top_p: settings.summaryTopP,
                 num_predict: settings.summaryMaxTokens,
             },
         };
@@ -1147,6 +1170,25 @@ function sleep(ms) {
  * never inherited from the chat's generation setting, which governs the chat.
  * A value of 0 means "send no override and let SillyTavern decide".
  */
+/**
+ * Sampling for our own requests, shared by archiving and summarizing.
+ *
+ * Both stages run the same kind of work — restate this material in this exact
+ * format — so they get the same settings, and they get them from here rather
+ * than from a constant that only applied to one of them. Top-p 1 lets the model
+ * reach for any token in the tail, which is how a record ends up with a stray
+ * fragment instead of the event it was asked for.
+ */
+function samplingFor() {
+    const settings = getSettings() || {};
+    const temperature = Number(settings.summaryTemperature);
+    const topP = Number(settings.summaryTopP);
+    return {
+        temperature: Number.isFinite(temperature) ? Math.max(0, Math.min(2, temperature)) : 0.6,
+        top_p: Number.isFinite(topP) ? Math.max(0.05, Math.min(1, topP)) : 0.8,
+    };
+}
+
 function responseLengthFor(fallback) {
     const limit = Number(getSettings()?.requestTokenLimit);
     if (Number.isFinite(limit) && limit > 0) return Math.max(256, Math.floor(limit));
@@ -1256,13 +1298,14 @@ async function directCompletion(prompt, label) {
     const streamed = getSettings().streamRequests !== false;
 
     const timeoutMs = requestTimeoutMs();
+    const sampling = samplingFor();
     const body = {
         type: 'quiet',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3,
+        temperature: sampling.temperature,
+        top_p: sampling.top_p,
         frequency_penalty: 0,
         presence_penalty: 0,
-        top_p: 1,
         max_tokens: limit,
         stream: streamed,
         chat_completion_source: oai.chat_completion_source,
@@ -1278,6 +1321,7 @@ async function directCompletion(prompt, label) {
 
     const source = body.custom_source || body.chat_completion_source || 'unknown source';
     log(`${label}: direct request via ${source}, model ${model || '(inherited)'}, ` +
+        `temperature ${sampling.temperature}, top_p ${sampling.top_p}, ` +
         `~${estimateTokens(prompt)} prompt tokens, ${limit} max output, ` +
         `${streamed ? 'streamed' : 'not streamed'}, ` +
         `${timeoutMs ? Math.round(timeoutMs / 1000) + 's limit' : 'no timeout'}`);
@@ -1463,9 +1507,11 @@ async function runCompletionOnce(prompt, fallbackTokens = 0) {
     const responseLength = responseLengthFor(fallbackTokens);
 
     if (settings.useCustomAPI && settings.customEndpoint && settings.customModel) {
+        const sampling = samplingFor();
         return await callCustomAPI(prompt, {
             ...settings,
-            summaryTemperature: 0.3,
+            summaryTemperature: sampling.temperature,
+            summaryTopP: sampling.top_p,
             summaryMaxTokens: responseLength || settings.summaryMaxTokens || 4096,
         });
     }
@@ -1719,7 +1765,9 @@ async function maybeCompressArchive() {
             log('Archive compression produced nothing — keeping lines as they are');
             return;
         }
-        state.chronicle = sortArchiveLines(parsed.entries.concat(kept));
+        // Merged lines keep the position of the oldest they replace, so the
+        // order of the record is preserved exactly as it was appended.
+        state.chronicle = parsed.entries.concat(kept);
         state.chronicleCompressedAt = state.chronicle.length;
         // Bumping the revision tells the lorebook pass that its line indices are stale.
         state.archiveRevision = (state.archiveRevision ?? 0) + 1;
@@ -1796,16 +1844,28 @@ async function generateSummary() {
                     startIndex: firstIdx,
                 }),
                 '{{part_label}}': remaining > batchSize ? `This is part ${batchNo}, in chronological order.` : '',
+                '{{time_rule}}': hasHeaders
+                    ? 'EVERY line above carries the REAL date, time and location of that message. Copy the date, the time and the place exactly as given. NEVER invent, renumber or estimate a time, and never reuse one line\'s time for the next: reuse the one written on THAT line.'
+                    // Without headers there is nothing to copy, and an invented clock
+                    // is worse than no clock: it silently reorders the record later.
+                    : 'These messages carry no date, time or place, so you must NOT invent any. Write [Day N] and nothing else, advancing N only when the material clearly moves on. Never write a clock time, a real date or a location you were not given.',
                 '{{day_hint}}': batchNo > 1
                     ? (hasHeaders
                         ? 'Use the exact date and time given on each message. Do not renumber or re-derive them.'
-                        : 'Continue advancing the clock from where the previous part ended.')
+                        : 'Continue the day counter from where the previous part ended.')
                     : '',
-                '{{time_rule}}': hasHeaders
-                    ? 'EVERY line above carries the REAL date, time and location of that message. Copy them exactly onto your line. NEVER invent, renumber or estimate a time — reuse the one given.'
-                    : 'Infer a plausible time and advance it by 1-5 minutes per exchange.',
             });
-            if (hasHeaders) log('Archive batch uses real message timestamps and locations');
+            if (hasHeaders) {
+                // Name the stamp that was actually read, so "the dates are invented"
+                // can be told apart from "the header was not recognised".
+                const sample = batch
+                    .map(m => parseMessageHeader(m && m.mes || ''))
+                    .find(h => h.found);
+                log('Archive batch uses real message timestamps: ' +
+                    (sample ? (metaStamp(sample.meta) || 'a header with no date or time') : 'a header was detected on some messages only'));
+            } else {
+                log('Archive batch has no Date/Time headers — the record will carry [Day N] instead of invented clock times');
+            }
 
             const chronText = await runCompletion(chronPrompt, `archive batch ${batchNo}/${totalBatches}`);
 
@@ -2692,9 +2752,16 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
-                    Summary temperature:
-                    <input type="number" id="es_temperature" value="${settings.summaryTemperature}" min="0" max="2" step="0.1" style="width: 60px;">
+                    My requests: temperature
+                    <input type="number" id="es_temperature" value="${settings.summaryTemperature}" min="0" max="2" step="0.05" style="width: 70px;">
                 </label>
+                <label class="enhanced-summary-label">
+                    top p
+                    <input type="number" id="es_top_p" value="${settings.summaryTopP ?? 0.8}" min="0.05" max="1" step="0.05" style="width: 70px;">
+                </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>One setting for both stages: archiving and summarizing restate material in a fixed format, so they sample the same way. top p 1 lets the model reach any token in the tail, which is where stray fragments come from.</span>
             </div>
             <div class="enhanced-summary-row es-section-head">
                 <span>Custom summarization API (optional)</span>
@@ -3168,8 +3235,14 @@ function bindUIEvents() {
 
 
     document.getElementById('es_temperature')?.addEventListener('change', (e) => {
-        settings.summaryTemperature = Math.max(0, Math.min(2, parseFloat(e.target.value) || 0.7));
+        settings.summaryTemperature = Math.max(0, Math.min(2, parseFloat(e.target.value) || 0.6));
         e.target.value = settings.summaryTemperature;
+        saveSettingsDebounced();
+    });
+
+    document.getElementById('es_top_p')?.addEventListener('change', (e) => {
+        settings.summaryTopP = Math.max(0.05, Math.min(1, parseFloat(e.target.value) || 0.8));
+        e.target.value = settings.summaryTopP;
         saveSettingsDebounced();
     });
 

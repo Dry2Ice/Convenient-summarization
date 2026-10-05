@@ -460,6 +460,36 @@ export function repairedText(msg) {
 }
 
 /**
+ * Where a set of record lines disagrees with itself about time.
+ *
+ * The archive is appended in the order the messages happened and is never
+ * re-sorted: a model that invents a clock, resets a day counter or copies one
+ * line out of order would otherwise silently reorder the whole history of the
+ * chat, which is worse than an approximate stamp. The breaks are reported so the
+ * cause is visible in the log instead of showing up as a story that jumps around.
+ */
+export function chronologyBreaks(entries, previous = null) {
+    const list = Array.isArray(entries) ? entries.filter(e => e && e.ts) : [];
+    const breaks = [];
+    let last = previous && previous.ts ? previous : null;
+
+    for (let i = 0; i < list.length; i++) {
+        const entry = list[i];
+        const value = timestampValue(entry.ts);
+        if (!Number.isFinite(value)) continue;
+        if (last) {
+            const previousValue = timestampValue(last.ts);
+            if (Number.isFinite(previousValue) && value < previousValue) {
+                breaks.push({ index: i, from: last.ts, to: entry.ts });
+            }
+        }
+        last = entry;
+    }
+
+    return breaks;
+}
+
+/**
  * Read the answer out of a streamed response, whatever shape its frames are in.
  *
  * With streaming on, SillyTavern pipes the provider's own server-sent events
@@ -870,23 +900,6 @@ export function timestampValue(ts) {
     return year * 31536000 + month * 2592000 + day * 86400 + hours * 3600 + minutes * 60;
 }
 
-/**
- * Order archive lines by their timestamp while keeping unparseable lines in
- * place relative to their neighbours — a model that restarts its day counter
- * must not silently reshuffle everything before it.
- */
-export function sortArchiveLines(lines) {
-    const list = Array.isArray(lines) ? lines : [];
-    const withKey = list.map((entry, i) => ({ entry, i, key: timestampValue(entry.ts) }));
-    const runnable = withKey.every(w => Number.isFinite(w.key));
-    if (!runnable) return list;
-
-    return withKey
-        .slice()
-        .sort((a, b) => (a.key - b.key) || (a.i - b.i))
-        .map(w => w.entry);
-}
-
 /** Keep the N most recently touched chat states and drop the rest. */
 export function pruneChatStates(states, limit) {
     const map = (states && typeof states === 'object') ? states : {};
@@ -920,6 +933,20 @@ export function chatStateKey(chatId, chatType) {
 export function parseMessageHeader(text) {
     const src = String(text ?? '');
     const lines = src.split('\n');
+
+    // A markdown table of headers is the other common shape, and the common one
+    // in modern roleplay templates:
+    //
+    //   | 📅 Date | 🕓 Time | 📍 Location | 🌤️ Weather |
+    //   |---|---|---|---|
+    //   | October 24, 2026 | 08:38 PM | Sergey's Apartment | Clear, cold |
+    //
+    // It was not recognised at all, and every consequence followed from that:
+    // the header was left in the body as noise, detection reported "no headers",
+    // and the archivist was told to invent times for a chat that had them.
+    const table = parseTableHeader(lines);
+    if (table) return table;
+
     const meta = {};
     let consumed = 0;
 
@@ -931,26 +958,22 @@ export function parseMessageHeader(text) {
             if (consumed > 0) { consumed++; break; }
             continue;
         }
-        const m = line.match(/^([A-Za-z][A-Za-z \/]{1,24}?)\s*:\s*(.+)$/);
+        // **Date:** and 📅 Date: are the same field with decoration.
+        const m = line.match(/^[*_\s]*([^\s:*_][A-Za-z][A-Za-z0-9 \/]{0,24}?)[*_\s]*:\s*(.+)$/);
         if (!m) {
             if (consumed === 0) return { found: false, meta: {}, body: src };
             break;
         }
-        const key = m[1].trim().toLowerCase();
-        const value = m[2].trim();
-        if (!value) {
+        const key = normalizeHeaderKey(m[1]);
+        // **Date:** puts its emphasis after the colon, so the decoration is
+        // trimmed off the value too.
+        const value = m[2].replace(/^[*_\s]+/, '').replace(/[*_\s]+$/, '').trim();
+        if (!key || !value) {
             if (consumed === 0) return { found: false, meta: {}, body: src };
             break;
         }
 
-        if (key.includes('date')) meta.date = value;
-        else if (key.includes('time')) meta.time = value;
-        else if (key.includes('day of') || key === 'day') meta.weekday = value;
-        else if (key.includes('location') || key === 'setting' || key === 'place') meta.location = value;
-        else if (key.includes('weather') || key.includes('sky')) meta.weather = value;
-        else if (key.includes('character') || key.includes('present')) meta.characters = value;
-        else meta[key] = value;
-
+        assignHeaderMeta(meta, key, value);
         consumed++;
     }
 
@@ -960,6 +983,64 @@ export function parseMessageHeader(text) {
     }
 
     return { found: true, meta, body: lines.slice(consumed).join('\n').replace(/^\n+/, '') };
+}
+
+/**
+ * Read a two-row markdown table of headers. Only the first row is treated as the
+ * header and only the second as its values, which is what these templates emit.
+ */
+function parseTableHeader(lines) {
+    let i = 0;
+    while (i < lines.length && !lines[i].trim()) i++;
+    if (i + 2 >= lines.length) return null;
+
+    const header = lines[i].match(/^\s*\|(.+)\|\s*$/);
+    const separator = lines[i + 1];
+    const values = lines[i + 2].match(/^\s*\|(.+)\|\s*$/);
+    if (!header || !values) return null;
+    // The separator row is what makes it a table: |---|---|---|---|
+    if (!/^\s*\|[\s:|-]+\|\s*$/.test(separator)) return null;
+
+    const keys = header[1].split('|').map(normalizeHeaderKey);
+    const cells = values[1].split('|').map(cell => cell.trim());
+    const meta = {};
+    keys.forEach((key, index) => {
+        const value = cells[index];
+        if (key && value) assignHeaderMeta(meta, key, value);
+    });
+
+    if (!meta.date && !meta.time && !meta.location) return null;
+
+    let consumed = i + 3;
+    // A table that sits at the very top with a blank line after it is a header;
+    // a table further down is part of the prose.
+    if (i > 0) return null;
+
+    return {
+        found: true,
+        meta,
+        body: lines.slice(consumed).join('\n').replace(/^\n+/, ''),
+    };
+}
+
+/** `📅 Date`, `**Date**` and `Date` all mean the same field. */
+function normalizeHeaderKey(raw) {
+    return String(raw ?? '')
+        .replace(/[*_`#]/g, ' ')
+        .replace(/[^\p{L}\p{N} \/]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function assignHeaderMeta(meta, key, value) {
+    if (key.includes('date')) meta.date = value;
+    else if (key.includes('time') || key.includes('clock')) meta.time = value;
+    else if (key.includes('day of') || key === 'day' || key.includes('weekday')) meta.weekday = value;
+    else if (key.includes('location') || key === 'setting' || key === 'place') meta.location = value;
+    else if (key.includes('weather') || key.includes('sky')) meta.weather = value;
+    else if (key.includes('character') || key.includes('present')) meta.characters = value;
+    else meta[key] = value;
 }
 
 /** Human-readable stamp from a parsed header, e.g. "July 13, 2025 8:31 AM". */
@@ -1008,9 +1089,9 @@ export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders
         const stamp = metaStamp(parsed.meta);
         if (stamp) bits.push(stamp);
         if (parsed.meta.location) bits.push(parsed.meta.location);
-        const head = bits.length ? `${bits.join(' | ')} | ` : '';
+        const head = bits.length ? `${bits.join(' | ')} |` : '';
 
-        return `[#${startIndex + i} · exchange ${exchange} · ${role}] ${head}\n${isUser ? 'User' : 'Assistant'}${name}: ${text}`;
+        return `[#${startIndex + i} · exchange ${exchange} · ${role}]${head ? ' ' + head : ''}\n${isUser ? 'User' : 'Assistant'}${name}: ${text}`;
     }).join('\n\n');
 }
 

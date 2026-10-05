@@ -42,7 +42,16 @@ SillyTavern.
    every one of those numbers back: a batch that drops more than a fifth of its
    messages is rejected rather than committed, because a message the record skips
    is lost from the prompt and the record at once. A refusal, prose without
-   timestamps or a missing index holds the watermark where it is.
+    timestamps or a missing index holds the watermark where it is.
+
+    Messages are timestamped from the real Date/Time/Location header of your
+    template, in either the `Key: value` or the markdown-table form. An embedded
+    chat inside a message is recorded by what was said in it, never by the act of
+    typing. With no header at all the record carries `[Day N]` and is told to
+    invent no clock: an invented time reorders the real chronology. The record is
+    appended in message order and never re-sorted — a clock the model wrote is
+    never allowed to rearrange history — and any line that goes backwards is
+    reported in the log.
 2. **Exclude.** Absorbed messages are marked with SillyTavern's own
    `is_system` flag — the same one its *Exclude message from prompts* button
    uses. The prompt builder drops them, the chat keeps them in full, and any
@@ -73,6 +82,8 @@ SillyTavern.
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
 | Give up on one request after | Wall-clock limit for a single request. A request still running after this is cut off, reported and retried instead of hanging the run. 0 removes the limit. |
 | Stream archival requests | On by default. Keeps a long generation alive behind a proxy that cuts off requests producing nothing, and shows the arriving characters so a slow run is visibly a working one. Frames are read in whatever shape the provider sends them; a provider that ignores streaming still works. |
+| My requests: temperature / top p | One setting for both stages, 0.6 and 0.8 by default. Both stages restate material in a fixed format, so they sample the same way; top p 1 lets the model reach any token in the tail, which is where stray fragments come from. |
+| Message headers | Auto-detect reads Date/Time/Location in either `Key: value` or markdown-table form. Turn it on if your template carries them and detection still says no. |
 | Retry attempts / Delay between retries | How often a failed or empty request is retried, and how long the pause is. The status line counts the pause down. |
 | View Current Summary / View Archive | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
 | Reset & Re-absorb | Discards the archive, summary and lorebook, releases every message, and re-archives from scratch. |

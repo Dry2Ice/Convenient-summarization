@@ -26,12 +26,12 @@ import {
     fitStage2Budgets,
     looksTruncatedRevision,
     markAbsorbed,
+    chronologyBreaks,
     reconcileWatermark,
     timestampValue,
     truncateForPrompt,
     formatMessages,
     perMessageCharLimit,
-    sortArchiveLines,
     pruneChatStates,
     chatStateKey,
     isTimestampLabel,
@@ -692,22 +692,48 @@ test('timestampValue parses day and time forms', () => {
     assert.ok(Number.isFinite(timestampValue('2025-07-12 09:20')));
 });
 
-test('sortArchiveLines orders by timestamp', () => {
-    const out = sortArchiveLines([
-        { ts: 'Day 1 10:00', text: 'c' },
-        { ts: 'Day 1 08:00', text: 'a' },
-        { ts: 'Day 1 09:00', text: 'b' },
+test('the record is never re-sorted, only checked for time going backwards', () => {
+    // Sorting the record by a clock the model wrote reorders real history
+    // whenever it invents, resets or copies a time wrong. Appending in message
+    // order is the only order that is always right, so a disagreement is
+    // reported rather than acted on.
+    const forward = chronologyBreaks([
+        { ts: 'October 24, 2026 08:38 PM', text: 'first' },
+        { ts: 'October 24, 2026 08:41 PM', text: 'second' },
+        { ts: 'October 25, 2026 09:02 AM', text: 'third' },
     ]);
-    assert.deepEqual(out.map(e => e.text), ['a', 'b', 'c']);
-});
+    assert.deepEqual(forward, [], 'a record that moves forward has no breaks');
 
-test('sortArchiveLines refuses to reshuffle when labels are inconsistent', () => {
-    const input = [
-        { ts: 'Day 2 10:00', text: 'later' },
-        { ts: '', text: 'undated' },
-        { ts: 'Day 1 08:00', text: 'earlier' },
-    ];
-    assert.deepEqual(sortArchiveLines(input), input);
+    const backwards = chronologyBreaks([
+        { ts: 'October 25, 2026 09:02 AM', text: 'later' },
+        { ts: 'October 24, 2026 08:38 PM', text: 'earlier' },
+    ]);
+    assert.equal(backwards.length, 1);
+    assert.equal(backwards[0].from, 'October 25, 2026 09:02 AM');
+    assert.equal(backwards[0].to, 'October 24, 2026 08:38 PM');
+
+    // A day counter the model restarted, which used to be the worst case.
+    const reset = chronologyBreaks([
+        { ts: 'Day 4 21:00', text: 'late on day four' },
+        { ts: 'Day 1 09:00', text: 'back to the morning' },
+    ]);
+    assert.equal(reset.length, 1, 'a restarted day counter is exactly what must be reported');
+
+    // Undated lines and unparseable labels are not breaks.
+    assert.deepEqual(chronologyBreaks([{ ts: '', text: 'no stamp' }, { ts: '??', text: 'junk' }]), []);
+    assert.deepEqual(chronologyBreaks(null), []);
+
+    // The check continues from the line already in the record, so a batch that
+    // starts later than the last line of the previous one is fine.
+    const acrossBatches = chronologyBreaks(
+        [{ ts: 'Day 2 10:00', text: 'first' }],
+        { ts: 'Day 1 08:00', text: 'the previous batch ended here' });
+    assert.deepEqual(acrossBatches, []);
+
+    const batchWentBack = chronologyBreaks(
+        [{ ts: 'Day 1 08:00', text: 'first' }],
+        { ts: 'Day 2 10:00', text: 'the previous batch ended here' });
+    assert.equal(batchWentBack.length, 1, 'a new batch that starts earlier than the last line is a break');
 });
 
 test('pruneChatStates keeps the most recently touched states', () => {
@@ -976,13 +1002,14 @@ test('timestampValue orders real dates correctly', () => {
     assert.ok(c < b, 'the previous day must sort first');
 });
 
-test('sortArchiveLines orders full calendar dates', () => {
-    const out = sortArchiveLines([
+test('full calendar dates in the record are compared, not used to reorder it', () => {
+    const lines = [
         { ts: 'July 12, 2025 2:01 PM', text: 'second' },
-        { ts: 'July 11, 2025 11:00 PM', text: 'first' },
-        { ts: 'July 12, 2025 1:15 PM', text: 'middle' },
-    ]);
-    assert.deepEqual(out.map(e => e.text), ['first', 'middle', 'second']);
+        { ts: 'July 11, 2025 11:00 PM', text: 'first, an hour earlier' },
+    ];
+    assert.equal(chronologyBreaks(lines).length, 1,
+        'a real date that goes backwards is still a break worth reporting');
+    assert.equal(chronologyBreaks([lines[1], { ...lines[0] }]).length, 0);
 });
 
 test('validateChronicleResponse expects one line per message', () => {
@@ -1544,6 +1571,94 @@ test('a renamed section is still injected under its old name', async () => {
     }
     assert.match(src, /function extractSection\(summary, sectionNames\)/);
     assert.match(src, /Array\.isArray\(sectionNames\) \? sectionNames : \[sectionNames\]/);
+});
+
+test('a markdown table of headers is read as the real date and time', () => {
+    // This is the shape modern roleplay templates actually use, and it was not
+    // recognised at all: the header stayed in the body as noise, detection said
+    // "no headers", and the archivist was then told to invent times for a chat
+    // that had a date on every single message.
+    const msg = [
+        '| 📅 Date | 🗓️ Weekday | 🕒 Time | 📍 Location | 🌤️ Weather |',
+        '|---|---|---|---|---|',
+        "| October 24, 2026 | Thursday | 08:38 PM | Sergey's Apartment, Bathroom | Clear, cold, 31°F |",
+        '',
+        'Sergey sets the phone down and looks at her.',
+        '"You actually came."',
+    ].join('\n');
+
+    const r = parseMessageHeader(msg);
+    assert.equal(r.found, true);
+    assert.equal(r.meta.date, 'October 24, 2026');
+    assert.equal(r.meta.time, '08:38 PM');
+    assert.equal(r.meta.location, "Sergey's Apartment, Bathroom");
+    assert.equal(r.meta.weather, 'Clear, cold, 31°F');
+    assert.equal(metaStamp(r.meta), 'October 24, 2026 08:38 PM');
+    assert.ok(!r.body.includes('October 24'), 'the table must not stay in the body');
+    assert.match(r.body, /Sergey sets the phone down/);
+
+    assert.equal(shouldDetectHeaders([{ mes: msg }, { mes: msg }, { mes: msg }, { mes: msg }]), true,
+        'a table header counts as a header for detection');
+});
+
+test('a table that is part of the prose is not mistaken for a header', () => {
+    const prose = [
+        'He opened the file and the table below showed the damage:',
+        '',
+        '| Item | Cost |',
+        '|---|---|',
+        '| Hull | 4000 |',
+    ].join('\n');
+    const r = parseMessageHeader(prose);
+    assert.equal(r.found, false, 'a table in the middle of the prose is content');
+    assert.equal(r.body, prose);
+});
+
+test('decorated keys are still keys', () => {
+    const bold = '**Date:** July 13, 2025\n**Time:** 8:31 AM\n**Location:** Pier\n\nBody.';
+    const r = parseMessageHeader(bold);
+    assert.equal(r.found, true);
+    assert.equal(metaStamp(r.meta), 'July 13, 2025 8:31 AM');
+    assert.equal(r.meta.location, 'Pier');
+    assert.match(r.body, /^Body\./, 'the emphasis must not end up in the value');
+});
+
+test('both stages share one temperature and one top p', async () => {
+    // They do the same kind of work — restate material in a fixed format — and
+    // they used to sample differently, with top p 1 letting the model reach any
+    // token in the tail. That is where stray fragments came from.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /function samplingFor\(\)/);
+    assert.match(src, /summaryTemperature: 0\.6/, 'the default temperature is 0.6');
+    assert.match(src, /summaryTopP: 0\.8/, 'the default top p is 0.8');
+
+    // Every request body takes its sampling from there, not from a constant.
+    const bodies = src.match(/temperature: sampling\.temperature,\s*\n\s*top_p: sampling\.top_p,/g) || [];
+    assert.ok(bodies.length >= 1, 'the direct request must use the shared sampling');
+    assert.ok(!/top_p: 1,/.test(src), 'top p 1 is gone');
+    assert.ok(!/temperature: 0\.3/.test(src), 'the old hardcoded 0.3 is gone');
+    assert.match(src, /id="es_top_p"/, 'the top p is settable');
+});
+
+test('without headers the archivist is told not to invent a clock', async () => {
+    // An invented time is worse than no time: the record is then sorted against
+    // a fiction, and the real chronology is gone.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /you must NOT invent any\. Write \[Day N\]/);
+    assert.match(src, /Never write a clock time, a real date or a location you were not given/);
+    assert.ok(!/Infer a plausible time and advance it by 1-5 minutes/.test(src));
+    // With headers it copies them instead.
+    assert.match(src, /Copy the date, the time and the place exactly as given/);
+});
+
+test('an embedded chat is recorded by its content, not by the act of typing', async () => {
+    // The reported failure: a message containing a text conversation came back as
+    // "the character typed and stopped typing", which describes nothing.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const chronicle = src.match(/const CHRONICLE_PROMPT_TEMPLATE = `([\s\S]*?)`;/)[1];
+    assert.match(chronicle, /EMBEDDED exchange/i);
+    assert.match(chronicle, /Never record the act of\s+typing, sending, reading, replying or stopping/i);
+    assert.match(chronicle, /what was said and done in it/i);
 });
 
 test('countExchanges counts user turns and never returns zero', () => {
