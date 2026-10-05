@@ -39,7 +39,13 @@ SillyTavern.
    uses. The prompt builder drops them, the chat keeps them in full, and any
    single message can be un-hidden by hand with the eye button.
 3. **Summary.** The existing summary, the new archive lines and the live edge of
-   the story are merged into a revised summary.
+   the story are merged into a revised summary. This is the largest request the
+   extension makes, so it is fitted to the context window *after* the
+   instructions have taken their share, and if the backend still says the input
+   is too long the material is halved and the request is rebuilt rather than
+   repeated unchanged. A revision that comes back a fraction of the length of the
+   summary it replaces is treated as a failure: the old summary is kept, because
+   a stub would throw away everything the archive preserves.
 4. **Lorebook.** Optional pass that extracts permanent world facts from the
    archive.
 5. **Inject.** Before the history: the emotional anchors and the archive. After
@@ -78,6 +84,14 @@ empty is reported with its cause rather than as "empty response":
   instead of the model.
 - *answered with an error* — the backend reported an error inside a successful
   response; the provider's own message is shown.
+- *the request did not fit* — the archive lines and the live edge are cut to
+  what the window can take after the instructions, and the stage is retried at
+  half the material if that is still not enough. The status line names the
+  budgets it settled on.
+
+Everything is logged to the browser console under `[enhancedSummary]`: the source,
+the model, the prompt size, the budgets, the elapsed time and the reason for
+every failure. That line is the fastest way to see which of these it was.
 
 ## Notes
 

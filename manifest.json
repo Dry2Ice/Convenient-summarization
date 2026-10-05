@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Dry2Ice",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "homePage": "https://github.com/Dry2Ice/Convenient-summarization",
   "description": "Archives chat history into a validated chronological record using the real Date/Time/Location headers when the chat template provides them, keeps the last N messages raw and excludes the absorbed ones from the prompt with SillyTavern's own flag (they stay readable in the chat), maintains a per-chat summary of character and plot state that can be hand-edited, and builds a lorebook. Token-budgeted against the real context window, with per-request retries and manual cancellation."
 }

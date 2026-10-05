@@ -22,6 +22,8 @@ import {
     completionErrorText,
     reasoningText,
     describeEmptyAnswer,
+    fitStage2Budgets,
+    looksTruncatedRevision,
     markAbsorbed,
     reconcileWatermark,
     timestampValue,
@@ -1170,9 +1172,89 @@ test('the archive and the summary are told to keep different jobs', async () => 
         assert.ok(summary.includes(section), `the summary prompt must keep the "${section}" section`);
     }
 
-    const stage2 = grab('SUMMARY_STAGE2_HEADER');
+    const stage2 = grab('SUMMARY_STAGE2_FRAMING');
     assert.match(stage2, /do NOT copy events out of the record into the summary/i);
     assert.match(stage2, /what it MEANT/i);
+
+    // The structural template used to be appended raw, so the model was handed
+    // the same brief twice and ended with literal {{summary}} and
+    // {{new_messages}} where it was supposed to answer.
+    assert.ok(!src.includes('SUMMARY_STAGE2_HEADER'), 'the duplicated stage 2 header must be gone');
+    assert.match(src, /function buildStage2Prompt\(/);
+    assert.match(src, /'\{\{new_messages\}\}': hasMessagesSlot \? material : ''/);
+});
+
+test('the summary request is fitted to the window once the instructions are counted', () => {
+    // The stage 2 request is the biggest one the extension makes, and the
+    // instructions are several thousand tokens of it. Budgeting only the
+    // material is how it outgrew the window and came back as an error.
+    const fitted = fitStage2Budgets({
+        window: 32768,
+        share: 0.3,
+        overheadTokens: 5000,
+        archiveTokens: 12000,
+        recentTokens: 6000,
+    });
+    assert.equal(fitted.capped, true);
+    assert.equal(fitted.cappedBy, 'window');
+    assert.ok(fitted.archive + fitted.recent <= fitted.usable,
+        `blocks ${fitted.archive}+${fitted.recent} must fit in ${fitted.usable}`);
+    assert.ok(fitted.recent > 0, 'the live edge is what the summary must reflect');
+    assert.ok(fitted.archive > 0, 'the record still has to be there');
+});
+
+test('a small window takes a larger share rather than losing the summary entirely', () => {
+    // A third of a 16k window cannot even hold the instructions, and a summary
+    // that never runs is worse than one that takes most of the window.
+    const fitted = fitStage2Budgets({
+        window: 16384,
+        share: 0.3,
+        overheadTokens: 5000,
+        archiveTokens: 12000,
+        recentTokens: 6000,
+    });
+    assert.equal(fitted.cappedBy, 'share');
+    assert.ok(fitted.archive > 0 && fitted.recent > 0);
+    assert.ok(fitted.archive + fitted.recent <= fitted.usable);
+});
+
+test('a request that already fits is left exactly as configured', () => {
+    const fitted = fitStage2Budgets({
+        window: 200000,
+        overheadTokens: 5000,
+        archiveTokens: 12000,
+        recentTokens: 6000,
+    });
+    assert.deepEqual(
+        { archive: fitted.archive, recent: fitted.recent, capped: fitted.capped },
+        { archive: 12000, recent: 6000, capped: false },
+    );
+});
+
+test('an unknown context window means no cap, and says so', () => {
+    const fitted = fitStage2Budgets({ window: 0, archiveTokens: 12000, recentTokens: 6000 });
+    assert.equal(fitted.capped, false);
+    assert.equal(fitted.cappedBy, null);
+    assert.equal(fitted.archive, 12000);
+});
+
+test('instructions that alone outgrow the window stop the request instead of sending it', () => {
+    const fitted = fitStage2Budgets({ window: 8000, overheadTokens: 9000, archiveTokens: 4000, recentTokens: 2000 });
+    assert.equal(fitted.capped, true);
+    assert.equal(fitted.cappedBy, 'overhead');
+    assert.equal(fitted.archive, 0);
+    assert.equal(fitted.recent, 0);
+});
+
+test('a stub cannot quietly replace a real summary', () => {
+    const long = 'x'.repeat(8000);
+    assert.equal(looksTruncatedRevision(long, 'too short'), true);
+    assert.equal(looksTruncatedRevision(long, ''), true);
+    // A genuine compression of an over-long summary is allowed through.
+    assert.equal(looksTruncatedRevision(long, 'y'.repeat(5000)), false);
+    // Nothing to compare against: the first summary is always accepted.
+    assert.equal(looksTruncatedRevision('', 'brand new summary'), false);
+    assert.equal(looksTruncatedRevision(null, null), false);
 });
 
 test('every request carries a timeout and the cancel signal', async () => {

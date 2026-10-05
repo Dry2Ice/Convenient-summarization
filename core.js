@@ -412,6 +412,86 @@ export function repairedText(msg) {
 }
 
 /**
+ * Split the two variable blocks of the summary request into what is actually
+ * left of the context window.
+ *
+ * The scaffolding is not free: the guardrail, the framing and the structural
+ * template run to several thousand tokens, and the summary request is the single
+ * largest one the extension makes. Budgeting the archive and the live edge as if
+ * that scaffolding were free is how the request silently outgrows the window —
+ * the backend then answers with an error, which reads as an empty response and
+ * happens again on every retry, with every model, because the cause is the size
+ * of the request and not the model.
+ *
+ * With no window to go by there is nothing to scale against, so the configured
+ * amounts stand and the caller is told the request is uncapped.
+ */
+export function fitStage2Budgets({
+    window = 0,
+    share = 0.3,
+    overheadTokens = 0,
+    archiveTokens = 0,
+    recentTokens = 0,
+    reserve = 2000,
+} = {}) {
+    const archive = Math.max(0, archiveTokens);
+    const recent = Math.max(0, recentTokens);
+    const requested = archive + recent;
+
+    const known = Number.isFinite(window) && window > 0;
+    if (!known) {
+        return { archive, recent, requested, usable: Infinity, capped: false, cappedBy: null };
+    }
+
+    const ratio = Math.max(0.05, Math.min(0.9, Number(share) || 0.3));
+    let usable = Math.floor(window * ratio) - Math.max(0, reserve) - Math.max(0, overheadTokens);
+
+    // The summary request genuinely needs a large share of a small window, so a
+    // third of it being too small for the instructions is not a reason to give
+    // up: the share is raised before the request is abandoned.
+    let cappedBy = 'window';
+    if (usable <= 0) {
+        usable = Math.floor(window * 0.9) - Math.max(0, reserve) - Math.max(0, overheadTokens);
+        cappedBy = 'share';
+    }
+
+    // Nothing at all fits: better an honest zero than a request that cannot.
+    if (usable <= 0) return { archive: 0, recent: 0, requested, usable: 0, capped: true, cappedBy: 'overhead' };
+
+    if (requested <= usable) {
+        return { archive, recent, requested, usable, capped: cappedBy === 'share', cappedBy: cappedBy === 'share' ? 'share' : null };
+    }
+
+    // The live edge is what the summary must reflect, so it keeps its configured
+    // share of what is left rather than being cut first.
+    const recentShare = requested > 0 ? recent / requested : 0;
+    const recentKept = Math.min(recent, Math.floor(usable * Math.min(0.6, Math.max(0.2, recentShare))));
+    const archiveKept = Math.max(0, usable - recentKept);
+
+    return {
+        archive: archiveKept,
+        recent: Math.min(recent, recentKept),
+        requested,
+        usable,
+        capped: true,
+        cappedBy,
+    };
+}
+
+/**
+ * A revision this much shorter than the summary it replaces is not a better
+ * summary, it is a truncated or refused one. Storing it would silently throw
+ * away everything the archive was built to preserve.
+ */
+export function looksTruncatedRevision(previous, next, { floor = 0.35, minimumTokens = 40 } = {}) {
+    const before = String(previous || '').trim();
+    const after = String(next || '').trim();
+    if (!before) return false;
+    if (estimateTokens(after) >= minimumTokens && after.length >= before.length * floor) return false;
+    return true;
+}
+
+/**
  * Read the assistant text out of whatever the backend answered with.
  *
  * SillyTavern rewrites most sources back into the OpenAI shape, but several pass

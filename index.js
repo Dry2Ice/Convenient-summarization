@@ -9,6 +9,8 @@ import {
     completionErrorText,
     reasoningText,
     describeEmptyAnswer,
+    fitStage2Budgets,
+    looksTruncatedRevision,
     reconcileWatermark,
     formatMessages,
     perMessageCharLimit,
@@ -558,38 +560,63 @@ Now output the record.
 
 Output only the timestamped lines.`;
 
-const SUMMARY_STAGE2_HEADER = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
+const SUMMARY_STAGE2_FRAMING = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
 
-You are revising an existing summary. The first block is the current summary. The second block is the newly absorbed chronological record, one factual line per message. The third block is the most recent exchanges, still in full.
-
-Merge them: keep the existing summary intact, revise it only where the new material changes something, and fold in everything genuinely new. Never drop an existing Core Memory, cause, thread, secret, or motif.
+You are revising an existing summary from a roleplay that is still going on. The brief that follows
+tells you the required structure and where your input is. Read it as one instruction, not as several.
 
 DIVISION OF LABOUR, and it is strict:
-- The chronological record owns the events: what was said and done, message by message.
-- This summary owns everything the record cannot show: feelings and subtext, motives and
-misreadings, what each character knows and hides, how the relationships moved and why,
-what it all costs them, the live secrets, the hooks and debts still unpaid, and the
-trajectory of the story.
-- Therefore: do NOT copy events out of the record into the summary. A line that only
-restates what was said or done does not belong in the summary at all.
-- Read the record for WHAT happened, then write down what it MEANT: the emotion behind it,
-the motive behind it, and the pressure it left behind.
+- The chronological record you are given owns the events: what was said and done, message by message.
+- This summary owns everything the record cannot show: feelings and subtext, motives and misreadings,
+what each character knows and hides, how the relationships moved and why, what it costs them, the live
+secrets, the hooks and debts still unpaid, and the trajectory of the story.
+- Do NOT copy events out of the record into the summary. A line that only restates what was said or
+done does not belong in the summary at all.
+- Read the record for WHAT happened, then write down what it MEANT: the emotion behind it, the motive
+behind it, and the pressure it left behind.
 
-The last N exchanges below are the live edge of the story. They are the present moment. Weight them heavily when determining the CURRENT emotional landscape and trajectory, because that is what the model must act on right now.
+Keep the existing summary intact. Revise it only where the new material changes something, and fold in
+everything genuinely new. Never drop an existing Core Memory, cause, thread, secret, or motif.
 
-=== EXISTING SUMMARY ===
-{{summary}}
-=== END EXISTING SUMMARY ===
-
-=== CHRONOLOGICAL RECORD (newly absorbed) ===
-{{chronicle}}
-=== END CHRONOLOGICAL RECORD ===
-
-=== MOST RECENT EXCHANGES (live edge, full text) ===
-{{recent}}
-=== END RECENT EXCHANGES ===
+The most recent exchanges are the live edge of the story: the present moment. Weight them heavily when
+determining the CURRENT emotional landscape and trajectory, because that is what the model must act on
+right now.
 
 `;
+
+/**
+ * Build the summary request.
+ *
+ * The user's summary template is the single instruction document: its input
+ * slots are filled here, so the model is never handed the same brief twice, and
+ * never sees a literal {{summary}} or {{new_messages}} at the very end of the
+ * prompt where it is supposed to answer. A template that has no slots at all
+ * still gets the material, appended under a heading of its own.
+ */
+function buildStage2Prompt({ summaryText, recordText, recentText }) {
+    const settings = getSettings();
+    const template = typeof settings.summaryPrompt === 'string' && settings.summaryPrompt.trim()
+        ? settings.summaryPrompt
+        : SUMMARY_PROMPT_TEMPLATE;
+
+    const hasSummarySlot = template.includes('{{summary}}');
+    const hasMessagesSlot = template.includes('{{new_messages}}');
+    const material = [recordText, recentText].filter(Boolean).join('\n\n');
+
+    let body;
+    if (hasSummarySlot || hasMessagesSlot) {
+        body = buildSummaryPrompt(template, {
+            '{{summary}}': hasSummarySlot ? (summaryText || '(none — create from scratch)') : '',
+            '{{new_messages}}': hasMessagesSlot ? material : '',
+        });
+    } else {
+        // A template written by hand may have no slots at all. The material still
+        // has to reach the model, or the brief describes a job with no input.
+        body = `${template}\n\n=== CHRONOLOGICAL RECORD (newly absorbed) ===\n${recordText || '(none)'}\n=== END CHRONOLOGICAL RECORD ===\n\n=== MOST RECENT EXCHANGES (live edge) ===\n${recentText || '(none)'}\n=== END RECENT EXCHANGES ===`;
+    }
+
+    return guardrail() + SUMMARY_STAGE2_FRAMING + body;
+}
 
 const LOREBOOK_PROMPT_TEMPLATE = `You are a lore archivist extracting permanent world facts from a roleplay's history. Do NOT roleplay. Do NOT produce any in-character text.
 
@@ -1419,11 +1446,22 @@ function statusTicker(render, intervalMs = 1000) {
     return () => { stopped = true; clearInterval(id); };
 }
 
-async function runCompletion(prompt, label = 'request', { fallbackTokens = 0 } = {}) {
+/**
+ * A backend saying the input is too long is a fact about the request, not about
+ * the model, so repeating it unchanged wastes every retry.
+ */
+const CONTEXT_ERROR_RE = /context (?:window|length)|maximum context|too many tokens|token limit|payload too large|request too large|input is too long|exceeds the context|reduce the length|\b413\b/i;
+
+function isContextLengthError(error) {
+    if (!error) return false;
+    return Boolean(error.isContextLength) || CONTEXT_ERROR_RE.test(String(error.message || ''));
+}
+
+async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, shrink = null } = {}) {
     const settings = getSettings();
     const maxRetries = Math.max(0, settings.retryAttempts);
     const delayMs = Math.max(5, settings.retryDelaySeconds) * 1000;
-    const promptTokens = estimateTokens(prompt);
+    let promptTokens = estimateTokens(prompt);
     const outputLimit = responseLengthFor(fallbackTokens);
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -1450,6 +1488,7 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0 } =
             if (answer && typeof answer === 'object') {
                 const err = new Error(answer.emptyReason || 'the model returned an empty answer');
                 err.isEmptyResponse = true;
+                if (isContextLengthError(err)) err.isContextLength = true;
                 throw err;
             }
 
@@ -1483,6 +1522,17 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0 } =
             if (error.isContentFiltered || error.isRefusal) {
                 setStatus(reason);
                 throw error;
+            }
+
+            // A request that does not fit is rebuilt smaller and sent again at
+            // once: the same too-large request will fail the same way every time.
+            if (isContextLengthError(error) && typeof shrink === 'function') {
+                const smaller = shrink();
+                if (smaller) {
+                    prompt = smaller;
+                    promptTokens = estimateTokens(prompt);
+                    continue;
+                }
             }
 
             const isLast = attempt === maxRetries;
@@ -1710,32 +1760,101 @@ async function generateSummary() {
         // and repeating them on every recent answer only burns the budget.
         const recent = hasHeaders ? stripHeaders(recentRaw) : recentRaw;
 
-        // One long roleplay reply can swamp the request, so the recent answers
-        // get a shared character budget rather than going in at full length.
-        const recentBudget = budgetFor(settings.recentAnswerTokens);
-        const perMsgChars = perMessageCharLimit(recentBudget * 4, recent.length);
-        const recentText = formatMessagesForSummary(recent, { maxChars: perMsgChars });
-        log('Stage 2: recent answers', recent.length, '| per-message limit', perMsgChars, 'chars',
-            '| headers stripped:', hasHeaders);
-
-        // Select the archive lines that matter for this moment rather than
-        // flooding the request with the entire history.
-        const archiveBudget = budgetFor(settings.stage2ArchiveTokens);
-        const picked = selectRelevantArchive(state.chronicle, recentText, {
-            budgetTokens: archiveBudget,
+        // This is the biggest request the extension makes, so the two variable
+        // blocks are fitted to what is left of the window once the instructions
+        // have taken their share. Budgeting them as if the instructions were free
+        // is what pushed the request past the limit and turned the backend's
+        // error into "empty response" on every attempt.
+        const scaffolding = estimateTokens(
+            guardrail() + SUMMARY_STAGE2_FRAMING + (settings.summaryPrompt || SUMMARY_PROMPT_TEMPLATE));
+        const fitted = fitStage2Budgets({
+            window: getContextWindow(),
+            share: settings.contextWindowShare ?? 0.3,
+            overheadTokens: scaffolding,
+            archiveTokens: budgetFor(settings.stage2ArchiveTokens),
+            recentTokens: budgetFor(settings.recentAnswerTokens),
         });
-        log('Stage 2: archive lines', picked.lines.length, 'of', state.chronicle.length,
-            '(~' + picked.used + ' tokens, dropped ' + picked.dropped + ')');
+        log('Stage 2: scaffolding ~' + scaffolding + ' tokens | archive budget ' +
+            fitted.archive + ' | recent budget ' + fitted.recent +
+            (fitted.capped ? ' | CAPPED (' + fitted.cappedBy + ')' : '') +
+            (fitted.cappedBy === 'window' ? ' | usable ' + fitted.usable + ' of a ' + getContextWindow() + ' window' : ''));
 
-        const sumPrompt = guardrail() + buildSummaryPrompt(SUMMARY_STAGE2_HEADER, {
-            '{{summary}}': state.summary || '(none — create from scratch)',
-            '{{chronicle}}': formatArchiveLines(picked.lines) || '(the archive is empty)',
-            '{{recent}}': recentText,
-        }) + settings.summaryPrompt;
+        if (fitted.cappedBy === 'overhead') {
+            setStatus('the summary request cannot fit this context window — lower the injection budgets or the template length');
+            log('WARNING: the instructions alone outgrow the window; stage 2 was not attempted');
+            return;
+        }
 
-        const summary = await runCompletion(sumPrompt, 'summary revision');
+        let recordScale = 1;
+
+        // The material for the request, rebuilt at a smaller size when the
+        // backend turns out to disagree about how much fits.
+        const buildMaterial = () => {
+            // One long roleplay reply can swamp the request, so the recent answers
+            // get a shared character budget rather than going in at full length.
+            const perMsgChars = perMessageCharLimit(
+                Math.max(200, Math.round(fitted.recent * recordScale)) * 4,
+                recent.length,
+            );
+            const recentText = formatMessagesForSummary(recent, { maxChars: perMsgChars });
+
+            // Select the archive lines that matter for this moment rather than
+            // flooding the request with the entire history.
+            const archiveBudget = Math.max(0, Math.round(fitted.archive * recordScale));
+            const picked = selectRelevantArchive(state.chronicle, recentText, {
+                budgetTokens: archiveBudget,
+            });
+            log('Stage 2: archive lines', picked.lines.length, 'of', state.chronicle.length,
+                '(~' + picked.used + ' tokens, dropped ' + picked.dropped + ', scale ' + recordScale.toFixed(2) + ')');
+            log('Stage 2: recent answers', recent.length, '| per-message limit', perMsgChars, 'chars',
+                '| headers stripped:', hasHeaders);
+
+            return {
+                recentText,
+                recordText: formatArchiveLines(picked.lines) || '(the archive is empty)',
+            };
+        };
+
+        let material = buildMaterial();
+        let sumPrompt = buildStage2Prompt({
+            summaryText: state.summary,
+            recordText: material.recordText,
+            recentText: material.recentText,
+        });
+        log('Stage 2: prompt ~' + estimateTokens(sumPrompt) + ' tokens');
+
+        // A backend that says the input is too long is believed: the material is
+        // halved and the same request is rebuilt, rather than repeating the same
+        // too-large request until the retries run out.
+        const shrinkMaterial = () => {
+            if (recordScale <= 0.2) return null;
+            recordScale = recordScale <= 0.5 ? 0.5 : 0.35;
+            material = buildMaterial();
+            sumPrompt = buildStage2Prompt({
+                summaryText: state.summary,
+                recordText: material.recordText,
+                recentText: material.recentText,
+            });
+            log('Stage 2: the request did not fit — retrying with ~' + Math.round(recordScale * 100) +
+                '% of the material, ~' + estimateTokens(sumPrompt) + ' tokens');
+            return sumPrompt;
+        };
+
+        const summary = await runCompletion(sumPrompt, 'summary revision', { shrink: shrinkMaterial });
         if (summary && summary.trim()) {
-            state.summary = summary.trim();
+            const trimmed = summary.trim();
+
+            // A revision that is a fraction of the summary it replaces is a
+            // truncated or half-answered one, not a better summary. Storing it
+            // would throw away exactly what the archive was built to preserve,
+            // so the old summary is kept and the loss is reported.
+            if (looksTruncatedRevision(state.summary, trimmed)) {
+                const err = new Error('the model returned a much shorter summary than the one it was given — the old summary was kept');
+                err.isTruncatedRevision = true;
+                throw err;
+            }
+
+            state.summary = trimmed;
             state.summaryMessageId = chat.length - 1;
             state.messageCountSinceSummary = 0;
             saveSettingsDebounced();
