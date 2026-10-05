@@ -411,6 +411,104 @@ export function repairedText(msg) {
     return String(msg.mes ?? '').trim() === PLACEHOLDER ? msg[ORIGINAL_MES_KEY] : msg.mes;
 }
 
+/**
+ * Read the assistant text out of whatever the backend answered with.
+ *
+ * SillyTavern rewrites most sources back into the OpenAI shape, but several pass
+ * the provider's own JSON through untouched: Cohere answers with message.content
+ * as an array of blocks, Mistral and AI21 with their own envelopes, and a custom
+ * endpoint that is not OpenAI-compatible with something else again. Assuming one
+ * shape is how a perfectly working model gets reported as "returned an empty
+ * response" and then retried until the run gives up.
+ */
+export function extractCompletionText(data) {
+    if (data === null || data === undefined) return '';
+    if (typeof data === 'string') return data;
+
+    // OpenAI, and everything SillyTavern wraps into that shape.
+    const choice = Array.isArray(data.choices) ? data.choices[0] : null;
+    if (choice) {
+        if (typeof choice.text === 'string' && choice.text.trim()) return choice.text;
+        const message = choice.message || choice.delta || {};
+        if (typeof message.content === 'string') return message.content;
+        if (Array.isArray(message.content)) return joinBlocks(message.content);
+    }
+
+    // Anthropic, and any endpoint that answers with content blocks.
+    if (Array.isArray(data.content)) return joinBlocks(data.content);
+    if (typeof data.message?.content === 'string') return data.message.content;
+    if (Array.isArray(data.message?.content)) return joinBlocks(data.message.content);
+
+    // Cohere and the legacy completion APIs.
+    if (typeof data.text === 'string') return data.text;
+    const legacy = Array.isArray(data.generations) ? data.generations[0] : null;
+    if (typeof legacy?.text === 'string') return legacy.text;
+
+    // Google, which splits the answer over parts and flags thinking parts.
+    const parts = data.candidates?.[0]?.content?.parts ?? data.candidates?.[0]?.output?.parts;
+    if (Array.isArray(parts)) {
+        const text = parts
+            .filter(part => part && !part.thought && typeof part.text === 'string')
+            .map(part => part.text)
+            .join('\n\n');
+        if (text) return text;
+    }
+
+    // Ollama and the OpenAI Responses API.
+    if (typeof data.response === 'string') return data.response;
+    if (typeof data.output_text === 'string') return data.output_text;
+
+    return '';
+}
+
+function joinBlocks(blocks) {
+    return (blocks || [])
+        .map(block => {
+            if (typeof block === 'string') return block;
+            return typeof block?.text === 'string' ? block.text : '';
+        })
+        .filter(Boolean)
+        .join('\n\n');
+}
+
+/** An error the backend reported inside an otherwise successful response. */
+export function completionErrorText(data) {
+    const error = data?.error;
+    if (!error) return '';
+    if (typeof error === 'string') return error.slice(0, 300);
+    return String(error.message || error.msg || error.detail || '').slice(0, 300);
+}
+
+/** The chain of thought a provider returned separately from the answer. */
+export function reasoningText(data) {
+    const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
+    const separate = choice?.message?.reasoning_content ?? choice?.delta?.reasoning_content ?? data?.reasoning_content;
+    if (typeof separate === 'string') return separate;
+    if (Array.isArray(separate)) {
+        return separate.map(part => (typeof part === 'string' ? part : part?.text || '')).join('');
+    }
+    return '';
+}
+
+/**
+ * Explain an answer that turned out to be empty, instead of leaving "empty
+ * response" on screen with no idea which of the four causes it actually was.
+ */
+export function describeEmptyAnswer({ error = '', reasoning = '', finishReason = '', parsed = true, contentType = '' } = {}) {
+    if (error) return `the backend answered with an error: ${error}`;
+    if (reasoning) {
+        return 'the model spent the whole answer budget on reasoning and returned no answer — raise "max output tokens", or archive with a model that does not think out loud';
+    }
+    if (finishReason === 'length') {
+        return 'the answer was cut off by the output limit before it held anything usable — raise "max output tokens"';
+    }
+    if (!parsed) {
+        return `the backend answered with ${contentType || 'something that is not JSON'} instead of JSON`;
+    }
+    if (finishReason) return `the model returned an empty answer (finish_reason: ${finishReason})`;
+    return 'the model returned an empty answer';
+}
+
 /** Mark the messages of one batch as absorbed, without touching other flags. */
 export function markAbsorbed(chat, from, to) {
     return chat.map((msg, i) => {

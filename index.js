@@ -5,6 +5,10 @@ import {
     ORIGINAL_MES_KEY,
     HIDDEN_FLAG,
     PLACEHOLDER,
+    extractCompletionText,
+    completionErrorText,
+    reasoningText,
+    describeEmptyAnswer,
     reconcileWatermark,
     formatMessages,
     perMessageCharLimit,
@@ -96,6 +100,7 @@ const DEFAULT_SETTINGS = {
     useGuardrail: true,
     guardrailText: DEFAULT_GUARDRAIL,
     requestTokenLimit: 8192,
+    requestTimeoutSeconds: 300,
     requestPath: 'direct',
 
     // Per-chat state lives here, keyed by chatId. Never shared between chats.
@@ -948,6 +953,7 @@ async function callCustomAPI(prompt, settings) {
     const endpoint = settings.customEndpoint.replace(/\/$/, '');
     const model = settings.customModel;
     const apiKey = settings.customApiKey;
+    const label = 'custom endpoint';
 
     let url, headers, body;
 
@@ -992,29 +998,42 @@ async function callCustomAPI(prompt, settings) {
         throw new Error(`Unsupported API type: ${apiType}`);
     }
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: activeRun?.controller.signal,
-    });
+    }, label);
+
+    const raw = await response.text();
 
     if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error ${response.status}: ${errorText}`);
+        let detail = raw.slice(0, 300);
+        try {
+            detail = completionErrorText(JSON.parse(raw)) || detail;
+        } catch { /* not JSON */ }
+        throw new Error(`API error ${response.status}: ${detail}`);
     }
 
-    const data = await response.json();
-
-    if (apiType === 'openai') {
-        return data.choices?.[0]?.message?.content || '';
-    } else if (apiType === 'anthropic') {
-        return data.content?.[0]?.text || '';
-    } else if (apiType === 'ollama') {
-        return data.response || '';
+    let data = null;
+    let parsed = true;
+    try {
+        data = JSON.parse(raw);
+    } catch {
+        parsed = false;
     }
 
-    return '';
+    const content = parsed ? extractCompletionText(data) : '';
+    if (content.trim()) return content;
+
+    return {
+        emptyReason: describeEmptyAnswer({
+            error: parsed ? completionErrorText(data) : '',
+            reasoning: parsed ? reasoningText(data) : '',
+            finishReason: data?.choices?.[0]?.finish_reason || data?.stop_reason || '',
+            parsed,
+            contentType: response.headers.get('content-type') || '',
+        }),
+    };
 }
 
 function setStatus(text) {
@@ -1050,9 +1069,64 @@ function sleep(ms) {
  * A value of 0 means "send no override and let SillyTavern decide".
  */
 function responseLengthFor(fallback) {
-    const limit = Number(getSettings().requestTokenLimit);
+    const limit = Number(getSettings()?.requestTokenLimit);
     if (Number.isFinite(limit) && limit > 0) return Math.max(256, Math.floor(limit));
     return fallback || null;
+}
+
+/**
+ * A wall-clock limit for one request. Without it a stalled upstream hangs the
+ * whole run with nothing on screen to tell it apart from slow generation, and the
+ * Stop button cannot reach it because the fetch was made without a signal.
+ * A value of 0 means no limit.
+ */
+function requestTimeoutMs() {
+    const seconds = Number(getSettings()?.requestTimeoutSeconds);
+    if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+    return Math.max(15, Math.floor(seconds)) * 1000;
+}
+
+/**
+ * Fetch with both a timeout and the current run's cancel signal, so one stalled
+ * request fails on its own instead of blocking the run forever, and so Stop works
+ * while it is in flight.
+ */
+async function fetchWithTimeout(url, init, label) {
+    const timeoutMs = requestTimeoutMs();
+    const controller = new AbortController();
+    const runSignal = activeRun?.controller.signal;
+
+    let timedOut = false;
+    const onRunAbort = () => controller.abort();
+    if (runSignal) {
+        if (runSignal.aborted) controller.abort();
+        else runSignal.addEventListener('abort', onRunAbort, { once: true });
+    }
+    const timer = timeoutMs
+        ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs)
+        : null;
+
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+        if (timedOut) {
+            const err = new Error(
+                `${label}: no answer after ${Math.round(timeoutMs / 1000)}s — the request was cut off ` +
+                '(raise the timeout, lower the batch size, or check the backend)',
+            );
+            err.isTimeout = true;
+            throw err;
+        }
+        if (runSignal?.aborted || error?.name === 'AbortError') {
+            const err = new Error('cancelled');
+            err.isCancelled = true;
+            throw err;
+        }
+        throw error;
+    } finally {
+        if (timer) clearTimeout(timer);
+        if (runSignal) runSignal.removeEventListener('abort', onRunAbort);
+    }
 }
 
 /**
@@ -1068,10 +1142,10 @@ async function directCompletion(prompt, label) {
     const oai = ctx.chatCompletionSettings || {};
     const limit = responseLengthFor(0) || 8192;
 
+    const timeoutMs = requestTimeoutMs();
     const body = {
         type: 'quiet',
         messages: [{ role: 'user', content: prompt }],
-        model: oai.custom_model || oai.model || '',
         temperature: 0.3,
         frequency_penalty: 0,
         presence_penalty: 0,
@@ -1081,38 +1155,72 @@ async function directCompletion(prompt, label) {
         chat_completion_source: oai.chat_completion_source,
         custom_prompt_post_processing: 'none',
     };
+    // Left out when unknown, so the backend applies its own default instead of
+    // being handed an empty model name.
+    const model = oai.custom_model || oai.model || '';
+    if (model) body.model = model;
     if (oai.custom_url) body.custom_url = oai.custom_url;
     if (oai.reverse_proxy) body.reverse_proxy = oai.reverse_proxy;
     if (oai.custom_source) body.custom_source = oai.custom_source;
 
-    log(`${label}: direct request, ~${estimateTokens(prompt)} prompt tokens, ${limit} max output`);
+    const source = body.custom_source || body.chat_completion_source || 'unknown source';
+    log(`${label}: direct request via ${source}, model ${model || '(inherited)'}, ` +
+        `~${estimateTokens(prompt)} prompt tokens, ${limit} max output, ` +
+        `${timeoutMs ? Math.round(timeoutMs / 1000) + 's limit' : 'no timeout'}`);
 
-    const response = await fetch('/api/backends/chat-completions/generate', {
+    const response = await fetchWithTimeout('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(body),
-    });
+    }, label);
+
+    const raw = await response.text();
 
     if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+        // The body usually carries the provider's own message, which says far
+        // more than the status code does.
+        let detail = raw.slice(0, 300);
+        try {
+            detail = completionErrorText(JSON.parse(raw)) || detail;
+        } catch { /* not JSON, the raw text is the best we have */ }
+        throw new Error(`HTTP ${response.status}: ${detail}`);
     }
 
-    const data = await response.json();
-    const choice = data?.choices?.[0];
-    const content = choice?.message?.content ?? choice?.text ?? '';
+    // Read the body as text first: a proxy that answers with an HTML error page
+    // or a stream would otherwise fail on response.json() and look like a crash.
+    let data = null;
+    let parsed = true;
+    try {
+        data = JSON.parse(raw);
+    } catch {
+        parsed = false;
+    }
+
+    const finishReason = Array.isArray(data?.choices) ? data.choices[0]?.finish_reason : '';
+    const content = parsed ? extractCompletionText(data) : '';
 
     // A provider that filters the output reports it here while leaving the
     // visible content null. It looks like an empty reply unless we name it.
-    if (choice?.finish_reason === 'content_filter' || (!content && choice?.finish_reason && choice.finish_reason !== 'stop' && choice.finish_reason !== 'length')) {
+    if (finishReason === 'content_filter' || (!content && finishReason && !['stop', 'length'].includes(finishReason))) {
         const err = new Error(
-            `the provider's content filter stopped the output (finish_reason: ${choice?.finish_reason || 'unknown'}). ` +
+            `the provider's content filter stopped the output (finish_reason: ${finishReason || 'unknown'}). ` +
             'It will not let the model restate this material.',
         );
         err.isContentFiltered = true;
         throw err;
     }
 
-    return content;
+    if (content.trim()) return content;
+
+    const note = describeEmptyAnswer({
+        error: parsed ? completionErrorText(data) : '',
+        reasoning: parsed ? reasoningText(data) : '',
+        finishReason: finishReason || '',
+        parsed,
+        contentType: response.headers.get('content-type') || '',
+    });
+    log(`${label}: empty answer from ${source} — ${note}`);
+    return { emptyReason: note };
 }
 
 /**
@@ -1225,6 +1333,11 @@ function rollbackSummary() {
 
 /** Count core memories so a revision that silently drops them can be spotted. */
 
+/**
+ * One attempt at the model. Answers with the text, or with an object carrying
+ * the reason it came back empty — an empty string cannot tell those apart, and
+ * that ambiguity is what made failures look random.
+ */
 async function runCompletionOnce(prompt, fallbackTokens = 0) {
     const settings = getSettings();
     const responseLength = responseLengthFor(fallbackTokens);
@@ -1248,7 +1361,8 @@ async function runCompletionOnce(prompt, fallbackTokens = 0) {
     };
     if (responseLength) options.responseLength = responseLength;
 
-    return await generateQuietPrompt(options);
+    const text = await generateQuietPrompt(options);
+    return text || { emptyReason: 'SillyTavern assembled the request and came back with nothing' };
 }
 
 /** Diagnose what the backend actually objected to, instead of guessing. */
@@ -1260,6 +1374,12 @@ function describeFailure(error) {
     if (error?.isContentFiltered) {
         return 'the provider\'s content filter blocked the output — it will not let the model restate this material. Point summarization at a different endpoint below, or accept that archiving this chat is not possible with this provider.';
     }
+    if (error?.isTimeout) {
+        return text.replace(/^[^:]+:\s*/, '') || 'the request timed out.';
+    }
+    if (error?.isEmptyResponse) {
+        return text;
+    }
     if (/\b524\b|\b408\b|timeout|timed out/i.test(text)) {
         return 'the proxy gave up waiting (524) — this generation took too long. Lower the output limit or the batch size.';
     }
@@ -1270,24 +1390,80 @@ function describeFailure(error) {
     if (/context.length|maximum context|too many tokens|payload/i.test(text)) {
         return 'the request did not fit the context window.';
     }
+    if (/failed to fetch|networkerror|load failed/i.test(text)) {
+        return 'the request never reached the backend — check the connection, the URL or the CORS setup.';
+    }
     return text.slice(0, 200) || 'unknown failure';
+}
+
+/**
+ * Keep the status line alive while nothing else can report progress.
+ *
+ * A request that takes a minute looks identical to a hung one when the only
+ * thing on screen is a status line that stopped changing, and there is no way to
+ * tell whether the model is working. A ticking line is the difference between
+ * "waiting" and "stuck".
+ */
+function statusTicker(render, intervalMs = 1000) {
+    const el = document.getElementById('es_status');
+    if (!el) return () => {};
+
+    let stopped = false;
+    const paint = () => {
+        if (stopped) return;
+        const text = render();
+        if (text) el.textContent = text;
+    };
+    paint();
+    const id = setInterval(paint, intervalMs);
+    return () => { stopped = true; clearInterval(id); };
 }
 
 async function runCompletion(prompt, label = 'request', { fallbackTokens = 0 } = {}) {
     const settings = getSettings();
     const maxRetries = Math.max(0, settings.retryAttempts);
     const delayMs = Math.max(5, settings.retryDelaySeconds) * 1000;
+    const promptTokens = estimateTokens(prompt);
+    const outputLimit = responseLengthFor(fallbackTokens);
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const startedAt = Date.now();
         try {
             throwIfCancelled();
-            const raw = await runCompletionOnce(prompt, fallbackTokens);
+            log(`${label}: attempt ${attempt + 1}/${maxRetries + 1} — ` +
+                `~${promptTokens} prompt tokens, output limit ${outputLimit || 'inherited'}, ` +
+                `give up after ${Math.round(requestTimeoutMs() / 1000)}s`);
+
+            const stopTicking = statusTicker(() =>
+                `${label}: waiting for the model (${Math.round((Date.now() - startedAt) / 1000)}s, ` +
+                `~${promptTokens} tokens sent, up to ${outputLimit || '?'} back)...`);
+
+            let answer;
+            try {
+                answer = await runCompletionOnce(prompt, fallbackTokens);
+            } finally {
+                stopTicking();
+            }
+
+            // A backend that answered with nothing comes back as a reason rather
+            // than as an empty string, so the run can say why.
+            if (answer && typeof answer === 'object') {
+                const err = new Error(answer.emptyReason || 'the model returned an empty answer');
+                err.isEmptyResponse = true;
+                throw err;
+            }
+
+            log(`${label}: answered in ${((Date.now() - startedAt) / 1000).toFixed(1)}s, ` +
+                `~${estimateTokens(answer)} tokens back`);
+
             // Reasoning arrives inside the visible content on several backends.
             // It is removed here, once, so no stage — archive, summary or
             // lorebook — can store or display a chain of thought.
-            const result = stripReasoning(raw);
+            const result = stripReasoning(answer);
             if (!result.trim()) {
-                throw new Error('the model returned an empty response');
+                const err = new Error('the model returned nothing but reasoning, with no answer to work with');
+                err.isEmptyResponse = true;
+                throw err;
             }
             // A refusal in place of the record must never be archived as though
             // it were content, so it is caught here rather than downstream.
@@ -1309,16 +1485,24 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0 } =
                 throw error;
             }
 
-            // No silent adaptation: a request that is refused is reported as it
-            // is, because quietly shrinking it hides the real problem.
             const isLast = attempt === maxRetries;
             if (isLast) {
                 throw new Error(`${label}: ${reason}`);
             }
+
+            // The pause between attempts is the longest silent stretch in the
+            // whole run, so it counts down instead of sitting there.
+            const until = Date.now() + delayMs;
             const waitSec = Math.round(delayMs / 1000);
             log(`${label}: ${reason} — retry ${attempt + 1}/${maxRetries} in ${waitSec}s`);
-            setStatus(`${label}: ${reason} — retry ${attempt + 1}/${maxRetries}`);
-            await sleep(delayMs);
+            const stopCountdown = statusTicker(() =>
+                `${label}: ${reason} — retry ${attempt + 1}/${maxRetries} in ` +
+                `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}s`);
+            try {
+                await sleep(delayMs);
+            } finally {
+                stopCountdown();
+            }
         }
     }
     return '';
@@ -2252,6 +2436,15 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
+                    Give up on one request after (sec)
+                    <input type="number" id="es_request_timeout" value="${settings.requestTimeoutSeconds}" min="0" max="7200" step="15" style="width: 100px;">
+                </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>A request that is still running after this is cut off, reported, and retried — instead of hanging the run with nothing on screen. 0 removes the limit.</span>
+            </div>
+            <div class="enhanced-summary-row">
+                <label class="enhanced-summary-label">
                     How requests are sent:
                     <select id="es_request_path" style="background-color: var(--black30a); border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; color: var(--SmartThemeBodyColor); padding: 4px 6px;">
                         <option value="direct" ${settings.requestPath !== 'sillytavern' ? 'selected' : ''}>Direct — my prompt only (fast, cheap)</option>
@@ -2685,6 +2878,12 @@ function bindUIEvents() {
     document.getElementById('es_request_limit')?.addEventListener('change', (e) => {
         settings.requestTokenLimit = Math.max(0, Math.min(128000, parseInt(e.target.value) || 0));
         e.target.value = settings.requestTokenLimit;
+        saveSettingsDebounced();
+    });
+
+    document.getElementById('es_request_timeout')?.addEventListener('change', (e) => {
+        settings.requestTimeoutSeconds = Math.max(0, Math.min(7200, parseInt(e.target.value) || 0));
+        e.target.value = settings.requestTimeoutSeconds;
         saveSettingsDebounced();
     });
 

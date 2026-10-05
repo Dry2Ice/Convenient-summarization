@@ -53,6 +53,9 @@ SillyTavern.
 | Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. |
 | Archive when N unarchived messages accumulate | The auto-trigger for a run. |
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
+| My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
+| Give up on one request after | Wall-clock limit for a single request. A request still running after this is cut off, reported and retried instead of hanging the run. 0 removes the limit. |
+| Retry attempts / Delay between retries | How often a failed or empty request is retried, and how long the pause is. The status line counts the pause down. |
 | View Current Summary / View Archive | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
 | Reset & Re-absorb | Discards the archive, summary and lorebook, releases every message, and re-archives from scratch. |
 | Rollback Summary | Restores the previous summary and releases the messages absorbed after it. |
@@ -60,10 +63,30 @@ SillyTavern.
 Slash commands: `/summarize`, `/clearsummary`, `/buildlorebook`, `/stop`,
 `/chronicle <search>`, `/lorebook <search>`.
 
+## When a run misbehaves
+
+Every request logs its source, model, prompt size, output limit and how long it
+took, and the status line shows the elapsed seconds while a request is in flight,
+so a slow run is visibly different from a stuck one. An answer that comes back
+empty is reported with its cause rather than as "empty response":
+
+- *spent the whole answer budget on reasoning* — the model thought its way
+  through the output limit. Raise **max output tokens**, or archive with a model
+  that does not think out loud.
+- *cut off by the output limit* — same cause, named from the provider's side.
+- *answered with something that is not JSON* — a proxy or gateway answered
+  instead of the model.
+- *answered with an error* — the backend reported an error inside a successful
+  response; the provider's own message is shown.
+
 ## Notes
 
 - Nothing is written into the message text. The extension only sets a flag, so
   there is no way for it to overwrite a message you wrote.
+- Answers are read from every response shape SillyTavern can return: OpenAI and
+  everything it wraps into that shape, Anthropic content blocks, Cohere, Mistral,
+  Google parts, Ollama and legacy completions. A working model is never reported
+  as having returned nothing because its backend used another envelope.
 - Per-chat state is kept separately for every chat and group.
 - Archived messages whose chat file lost its flag are re-marked from the
   watermark; a deleted message shifts the watermark back onto the last message

@@ -18,6 +18,10 @@ import {
     planPromptExclusion,
     repairedText,
     stripReasoning,
+    extractCompletionText,
+    completionErrorText,
+    reasoningText,
+    describeEmptyAnswer,
     markAbsorbed,
     reconcileWatermark,
     timestampValue,
@@ -1169,6 +1173,84 @@ test('the archive and the summary are told to keep different jobs', async () => 
     const stage2 = grab('SUMMARY_STAGE2_HEADER');
     assert.match(stage2, /do NOT copy events out of the record into the summary/i);
     assert.match(stage2, /what it MEANT/i);
+});
+
+test('every request carries a timeout and the cancel signal', async () => {
+    // A fetch made without a signal cannot be timed out or stopped: one stalled
+    // upstream request then hangs the whole run with nothing on screen, which is
+    // what "it just spins forever" meant.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+
+    const fetches = [...src.matchAll(/(?<![\w.])await fetch\(/g)];
+    assert.equal(fetches.length, 1,
+        'exactly one fetch may exist: the one inside fetchWithTimeout, which every request goes through');
+
+    assert.match(src, /function fetchWithTimeout\(/);
+    assert.match(src, /signal: controller\.signal/);
+    assert.match(src, /setTimeout\(\(\) => \{ timedOut = true; controller\.abort\(\); \}/);
+    // The run's own cancel signal has to reach the same controller.
+    assert.match(src, /runSignal\.addEventListener\('abort', onRunAbort, \{ once: true \}\)/);
+    assert.match(src, /requestTimeoutSeconds/);
+});
+
+test('the answer is read out of every response shape SillyTavern can return', () => {
+    // ST wraps most sources back into the OpenAI shape but passes Cohere, Mistral,
+    // AI21 and non-OpenAI custom endpoints through untouched. Reading only
+    // choices[0] made working models look like they returned nothing.
+    assert.equal(extractCompletionText({ choices: [{ message: { content: 'openai' } }] }), 'openai');
+    assert.equal(extractCompletionText({ choices: [{ text: 'legacy' }] }), 'legacy');
+    assert.equal(extractCompletionText({ message: { content: 'mistral' } }), 'mistral');
+    assert.equal(extractCompletionText({ content: [{ type: 'text', text: 'claude' }] }), 'claude');
+    assert.equal(extractCompletionText({ text: 'cohere' }), 'cohere');
+    assert.equal(extractCompletionText({ generations: [{ text: 'old style' }] }), 'old style');
+    assert.equal(extractCompletionText({ response: 'ollama' }), 'ollama');
+    assert.equal(extractCompletionText({ output_text: 'responses api' }), 'responses api');
+});
+
+test('Google-style parts are joined and thinking parts are left out', () => {
+    const google = {
+        candidates: [{
+            content: {
+                parts: [
+                    { text: 'reasoning that must not leak', thought: true },
+                    { text: 'the answer' },
+                ],
+            },
+        }],
+    };
+    assert.equal(extractCompletionText(google), 'the answer');
+});
+
+test('a response with nothing usable in it reads as empty rather than as junk', () => {
+    assert.equal(extractCompletionText({ choices: [{ message: { content: '' } }] }), '');
+    assert.equal(extractCompletionText({ choices: [{ message: { content: null } }] }), '');
+    assert.equal(extractCompletionText({ choices: [{ message: { content: [] } }] }), '');
+    assert.equal(extractCompletionText({}), '');
+    assert.equal(extractCompletionText(null), '');
+    assert.equal(extractCompletionText(undefined), '');
+});
+
+test('an error the backend hides inside a 200 response is not mistaken for an empty answer', () => {
+    // Google answers 200 with an error object when nothing could be generated.
+    assert.equal(completionErrorText({ error: { message: 'API key not valid' } }), 'API key not valid');
+    assert.equal(completionErrorText({ error: 'plain string error' }), 'plain string error');
+    assert.equal(completionErrorText({ choices: [] }), '');
+});
+
+test('reasoning returned separately from the answer is recognised', () => {
+    const payload = { choices: [{ message: { content: '', reasoning_content: 'the model thought about it' } }] };
+    assert.match(reasoningText(payload), /thought about it/);
+    assert.equal(reasoningText({ choices: [{ message: { content: 'answer' } }] }), '');
+    assert.equal(reasoningText(null), '');
+});
+
+test('an empty answer says which of the causes it was', () => {
+    assert.match(describeEmptyAnswer({ error: 'quota exceeded' }), /quota exceeded/);
+    assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /spent the whole answer budget on reasoning/);
+    assert.match(describeEmptyAnswer({ finishReason: 'length' }), /cut off by the output limit/);
+    assert.match(describeEmptyAnswer({ parsed: false, contentType: 'text/html' }), /text\/html instead of JSON/);
+    assert.match(describeEmptyAnswer({ finishReason: 'stop' }), /finish_reason: stop/);
+    assert.match(describeEmptyAnswer({}), /empty answer/);
 });
 
 test('countExchanges counts user turns and never returns zero', () => {
