@@ -1,0 +1,10 @@
+{
+  "name": "sillytavern-enhanced-summary",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "SillyTavern extension: archives chat history into an evolving chronicle, keeps a live summary of character and plot state, and builds a lorebook.",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
