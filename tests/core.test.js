@@ -1209,13 +1209,15 @@ test('the summary is told to be the fifth source, not a copy of the other four',
     const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
     const framing = src.match(/const SUMMARY_STAGE2_FRAMING = `([\s\S]*?)`;/)[1];
 
-    assert.match(framing, /FOUR SOURCES OF TRUTH/);
+assert.match(framing, /FOUR SOURCES OF TRUTH/);
     assert.match(framing, /CHARACTER CARD/);
-    assert.match(framing, /CHRONOLOGICAL RECORD/);
-    assert.match(framing, /MOST RECENT EXCHANGES/);
+    assert.match(framing, /MOST RECENT EXCHANGES/i);
     assert.match(framing, /Do NOT restate the card/i);
     assert.match(framing, /Do NOT restate the record/i);
     assert.match(framing, /Do NOT describe the last few exchanges/i);
+    // The record is a document in blocks of time now, not one line per message.
+    assert.ok(!/one factual line per message/.test(framing),
+        'the record must not be described to the model as a per-message transcript');
     // The old brief pushed the opposite way: present-moment first, always.
     assert.ok(!/Weight them heavily when\s+determining the CURRENT/i.test(framing),
         'the summary must not be steered towards the present moment any more');
@@ -1359,6 +1361,47 @@ test('times are the model\'s to place, and a real header is used when there is o
     assert.match(src, /The messages carry no timestamps at all, so work every time out of the material itself/);
     // Nothing may order the record by a clock the model wrote.
     assert.ok(!/sortArchiveLines|timestampValue\(/.test(src));
+});
+
+test('both stages are given the record, the seam and the new material, each labelled', async () => {
+    // Without the seam the model sees a finished document and then new material,
+    // and guesses what happened in between. Without the labels it cannot tell
+    // what it already has from what it is being asked to add.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    const chronicle = src.match(/const CHRONICLE_PROMPT_TEMPLATE = `([\s\S]*?)`;/)[1];
+
+    for (const slot of ['{{current_record}}', '{{recent_archived}}', '{{new_messages}}']) {
+        assert.ok(chronicle.includes(slot), `the record prompt must carry ${slot}`);
+        assert.ok(src.includes(`'${slot}'`), `${slot} must actually be filled`);
+    }
+    assert.match(chronicle, /THE RECORD SO FAR/);
+    assert.match(chronicle, /THE SEAM — ALREADY RECORDED, CONTEXT ONLY/);
+    assert.match(chronicle, /NEW MESSAGES — THESE ARE THE ONES TO WRITE UP/);
+    assert.match(chronicle, /Do\s+not write them up again/i);
+
+    // The tail of the record, not the whole of it: whole blocks, from the end.
+    assert.match(src, /function recordTailText\(maxTokens\)/);
+    assert.match(src, /recordTailText\(recordTailBudget\)/);
+
+    // Stage 2 gets the same three things, under labels the framing explains.
+    assert.match(src, /newMessagesText: material\.newMessagesText/);
+    assert.match(src, /seamText: material\.seamText/);
+    assert.match(src, /NEW MESSAGES — this run just absorbed these/);
+    assert.match(src, /THE SEAM — the last messages before those, already summarised/);
+    const framing = src.match(/const SUMMARY_STAGE2_FRAMING = `([\s\S]*?)`;/)[1];
+    assert.match(framing, /THE INPUT IS LABELLED, AND THE LABELS ARE TRUE/);
+    assert.match(framing, /Do not\s+re-report them as new developments/i);
+
+    // The messages absorbed in this run are shown to stage 2 as themselves; they
+    // are hidden from the prompt by then, so the record is their only other trace.
+    assert.match(src, /const archivedThisRun = \[\]/);
+    assert.match(src, /archivedThisRun\.push\(\.\.\.batch\)/);
+    assert.match(src, /formatMessagesForSummary\(stripHeaders\(archivedThisRun\)/);
+
+    // And the seam is configurable, because how much is enough is a judgement
+    // the user has to be able to make.
+    assert.match(src, /overlapMessages: 6/);
+    assert.match(src, /absorbedMessages\(overlapLimit\)/);
 });
 
 test('the record is trimmed by whole blocks, never by splitting one', async () => {

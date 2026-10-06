@@ -58,16 +58,24 @@ SillyTavern.
    message is written down by what was said in it, never by the act of typing.
    Nothing ever reorders the record, and a whole document sent back by mistake is
    caught in the log rather than appended twice.
+
+   Every batch is sent with three labelled parts, because a document that is being
+   continued has to be continued from the right place:
+
+   - **The record so far** — the end of it, whole blocks only, so the model copies
+     the shape instead of inventing one.
+   - **The seam** — the last few already-recorded messages, marked as context and
+     explicitly *not* to be written up again, so it can see exactly where the last
+     pass stopped.
+   - **New messages** — the only part it writes.
 2. **Exclude.** Absorbed messages are marked with SillyTavern's own
    `is_system` flag — the same one its *Exclude message from prompts* button
    uses. The prompt builder drops them, the chat keeps them in full, and any
    single message can be un-hidden by hand with the eye button.
-3. **Story bible.** The existing summary, the new record blocks and the live edge
-   of the story are merged into a revised summary. This is the largest request the
-   extension makes, so it is fitted to the context window *after* the
-   instructions have taken their share, and if the backend still says the input
-   is too long the material is halved and the request is rebuilt rather than
-   repeated unchanged. A revision that comes back a fraction of the length of the
+3. **Story bible.** The existing summary, the record, the live edge of the story
+   and the messages this run absorbed arrive as named blocks — *new messages*,
+   *the seam*, *the record*, *recent exchanges* — under an instruction that says
+   what each label means. A revision that comes back a fraction of the length of the
    summary it replaces is treated as a failure: the old summary is kept, because
    a stub would throw away everything the record preserves.
 4. **Lorebook.** Optional pass that extracts permanent world facts from the
@@ -84,6 +92,8 @@ SillyTavern.
 | Keep last N messages raw | The live tail. Never archived, never excluded, whatever the archive says. Raising it brings those messages back into the prompt immediately. This is the biggest lever on how hard the chat compresses. |
 | Everything injected, hard ceiling | The one number that decides the size of every request. The durable story memory is kept first, the world facts are sacrificed first. |
 | Record when N unrecorded messages accumulate | The auto-trigger for a run. |
+| Messages per record request | How many new messages go into one record request. Larger batches keep the time ranges continuous; smaller ones survive a provider that refuses long requests. |
+| Archived messages shown as the seam | How many already-absorbed messages are shown to both stages as the point where the last pass stopped. 6 is enough to see the join; 0 turns the seam off. |
 | Exclude archived messages from the AI prompt | Uses SillyTavern's own flag. Messages stay readable in the chat. |
 | My requests: max output tokens | The output limit for archival requests only. The chat's own limit is never touched. 0 sends no override. |
 | Give up on one request after | Wall-clock limit for a single request. A request still running after this is cut off, reported and retried instead of hanging the run. 0 removes the limit. |

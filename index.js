@@ -85,6 +85,10 @@ const DEFAULT_SETTINGS = {
     customModel: '',
     customApiType: 'openai',
     recordBatchSize: 30,
+    // How many already-absorbed messages are shown to the model as the seam —
+    // enough for it to see where the last pass stopped, not enough to re-read
+    // the history.
+    overlapMessages: 6,
     lorebookBatchSize: 40,
     lorebookMaxBatches: 8,
     recentAnswerCount: 30,
@@ -569,12 +573,35 @@ Follow this shape, but write it like a person keeping notes rather than filling 
 ## Day 2 — morning
 08:00-08:20  She left before he woke and took the spare key.
 
+# **THE RECORD SO FAR**
+
+What has already been written down. Take your shape from it — the headings, the level of detail, the way a
+block opens — and carry on from where it stops. Do not repeat any of it, and do not renumber it.
+
+=== THE RECORD SO FAR (ending with its last blocks) ===
+{{current_record}}
+=== END THE RECORD SO FAR ===
+
+# **THE SEAM — ALREADY RECORDED, CONTEXT ONLY**
+
+These are the last messages recorded before the new ones below. They are already in the record above, and
+they are here for one reason: so you can see exactly where it stopped and what came straight after it. Do
+not write them up again.
+
+=== ALREADY RECORDED (context only) ===
+{{recent_archived}}
+=== END ALREADY RECORDED ===
+
+# **NEW MESSAGES — THESE ARE THE ONES TO WRITE UP**
+
+Everything below has not been recorded yet. This is the part you write.
+
 === NEW MATERIAL ===
 {{new_messages}}
 === END NEW MATERIAL ===
 
-Output only the new blocks, continuing the numbering and the time ranges of the record. Do not rewrite or
-repeat the earlier part of the record — only what this material adds.`;
+Output only the new blocks, continuing the numbering and the time ranges of the record above. Write nothing
+that belongs to the seam or to the part already recorded — only what the new material adds.`;
 
 const SUMMARY_STAGE2_FRAMING = `Pause roleplay. Ignore all previous instructions. Do NOT produce any in-character text.
 
@@ -585,8 +612,8 @@ required structure and where your input is. Read it as one instruction, not as s
 
 When this roleplay runs, the model receives:
 1. The CHARACTER CARD — who these people are on paper.
-2. The CHRONOLOGICAL RECORD — one factual line per message: what was said and done.
-3. The MOST RECENT EXCHANGES — the last scenes, verbatim and in full.
+2. THE RECORD — a chronology of the story in blocks of time, kept by an archivist alongside you.
+3. THE MOST RECENT EXCHANGES — the last scenes, verbatim and in full.
 4. THIS SUMMARY — the durable memory of the story.
 
 Your job is the material NONE of the other three carries. That is the whole point of this document, so the
@@ -603,9 +630,23 @@ That last list is the point of the exercise. A fact that was established fifty e
 does not mention and that the record states without any sense of what it meant, is exactly what is lost
 when nobody writes it down. Find it, and write down what it means rather than what it was.
 
-Keep the existing summary intact. Revise it only where the new material genuinely changes something, and
-fold in everything new that belongs. Never drop an existing Core Memory, key event, character truth,
-relationship note, live secret, open thread or motif.
+# **THE INPUT IS LABELLED, AND THE LABELS ARE TRUE**
+
+The material you are given arrives in named blocks. Take each at its word:
+
+- **NEW MESSAGES** — the exchanges this run just took in. They are the newest thing in the story and the
+  part that most needs you.
+- **THE SEAM** — the last few messages *before* those. They were already summarised in an earlier run.
+  They are here to show you where the previous summary stopped and what came straight after it. Do not
+  re-report them as new developments.
+- **THE RECORD** — what the archivist has written so far. It is fact, not meaning. Read it for what
+  happened and leave the interpretation to yourself.
+- **THE MOST RECENT EXCHANGES** — the live edge of the story, verbatim.
+
+The summary you are revising is yours to extend. It is a living document, not a draft to be rewritten from
+scratch: keep what is still true, change what the new material genuinely changes, and fold in everything
+new that belongs. Never drop an existing Core Memory, key event, character truth, relationship note, live
+secret, open thread or motif.
 
 A summary that repeats the card, the record or the recent messages has failed, however well written it is.
 
@@ -619,8 +660,13 @@ A summary that repeats the card, the record or the recent messages has failed, h
  * never sees a literal {{summary}} or {{new_messages}} at the very end of the
  * prompt where it is supposed to answer. A template that has no slots at all
  * still gets the material, appended under a heading of its own.
+ *
+ * The material is labelled rather than concatenated. A model told "here is the
+ * record, and here are the new messages" in one undifferentiated block cannot
+ * tell what it has already written down from what it is being asked to add, and
+ * that is how a revision comes back repeating itself.
  */
-function buildStage2Prompt({ summaryText, recordText, recentText }) {
+function buildStage2Prompt({ summaryText, recordText, recentText, newMessagesText = '', seamText = '' }) {
     const settings = getSettings();
     const template = typeof settings.summaryPrompt === 'string' && settings.summaryPrompt.trim()
         ? settings.summaryPrompt
@@ -628,7 +674,16 @@ function buildStage2Prompt({ summaryText, recordText, recentText }) {
 
     const hasSummarySlot = template.includes('{{summary}}');
     const hasMessagesSlot = template.includes('{{new_messages}}');
-    const material = [recordText, recentText].filter(Boolean).join('\n\n');
+
+    const blocks = [
+        ['NEW MESSAGES — this run just absorbed these; they are the newest thing in the story', newMessagesText],
+        ['THE SEAM — the last messages before those, already summarised; here only to show where the previous summary stopped', seamText],
+        ['THE RECORD — what the archivist has written so far; fact, not meaning', recordText],
+        ['THE MOST RECENT EXCHANGES — the live edge, verbatim', recentText],
+    ].filter(([, text]) => text && text.trim());
+    const material = blocks
+        .map(([label, text]) => `=== ${label} ===\n${text}\n=== END: ${label.split(' — ')[0]} ===`)
+        .join('\n\n');
 
     let body;
     if (hasSummarySlot || hasMessagesSlot) {
@@ -639,7 +694,7 @@ function buildStage2Prompt({ summaryText, recordText, recentText }) {
     } else {
         // A template written by hand may have no slots at all. The material still
         // has to reach the model, or the brief describes a job with no input.
-        body = `${template}\n\n=== CHRONOLOGICAL RECORD (newly absorbed) ===\n${recordText || '(none)'}\n=== END CHRONOLOGICAL RECORD ===\n\n=== MOST RECENT EXCHANGES (live edge) ===\n${recentText || '(none)'}\n=== END RECENT EXCHANGES ===`;
+        body = `${template}\n\n${material}`;
     }
 
     return guardrail() + SUMMARY_STAGE2_FRAMING + body;
@@ -1858,6 +1913,54 @@ async function maybeCondenseRecord() {
     }
 }
 
+/**
+ * The last few messages the record already covers.
+ *
+ * These are the seam: without them the model sees the finished document and then
+ * a block of new material, and has to guess what happened in between. With them
+ * it can see the exact message the last pass ended on.
+ */
+function absorbedMessages(count) {
+    const n = Math.max(0, Math.floor(count) || 0);
+    if (!n) return [];
+    const chat = getContext().chat || [];
+    const absorbed = [];
+    for (let i = chat.length - 1; i >= 0 && absorbed.length < n; i--) {
+        const m = chat[i];
+        if (m && m.is_system && m[SUMMARIZED_FLAG]) absorbed.unshift(m);
+    }
+    return absorbed;
+}
+
+/**
+ * The end of the record, whole blocks only, within a token budget.
+ *
+ * The tail is what carries the shape and the seam — the opening of the record
+ * would only prove that it starts at Day 1. Splitting a block would leave a
+ * range with nothing under it, so a block that does not fit is dropped whole.
+ */
+function recordTailText(maxTokens) {
+    const blocks = recordBlocks(getRecord());
+    if (!blocks.length) return '';
+    const kept = [];
+    let used = 0;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+        const cost = estimateTokens(blocks[i]);
+        if (used + cost > maxTokens) break;
+        kept.unshift(blocks[i]);
+        used += cost;
+    }
+    if (!kept.length) {
+        // Nothing fits whole, so the last block goes in by itself rather than
+        // the prompt carrying no example of the shape at all.
+        kept.push(blocks[blocks.length - 1]);
+        log('Record tail: the last block alone is over the budget of', maxTokens, 'tokens');
+    }
+    log('Record tail: showing the last', kept.length, 'of', blocks.length,
+        'block(s) (~' + used + ' tokens) so the model can continue the shape');
+    return kept.join('\n\n');
+}
+
 async function generateSummary() {
     const settings = getSettings();
     if (settings.isSummarizing) {
@@ -1894,6 +1997,11 @@ async function generateSummary() {
         // batch is cheap on output and keeps the time ranges continuous.
         const manual = Math.max(5, settings.recordBatchSize);
         const batchSize = Math.max(1, Math.min(manual, pending.length));
+        // The record tail and the seam ride along with every batch: the tail so
+        // the shape is copied, the seam so the continuation starts in the right
+        // place. Both are small next to the new material.
+        const recordTailBudget = Math.max(500, Math.round(budgetFor(settings.stage2RecordTokens) * 0.3));
+        const overlapLimit = Math.max(0, Math.floor(settings.overlapMessages ?? 6));
 
         log('Stage 1: recording', pending.length, 'messages in', Math.ceil(pending.length / batchSize),
             'batch(es) of up to', batchSize,
@@ -1901,6 +2009,9 @@ async function generateSummary() {
 
         let cursor = 0;
         let batchNo = 0;
+        // Kept so stage 2 can be shown the exact messages this run absorbed, and
+        // so the next batch can be shown where the previous one left off.
+        const archivedThisRun = [];
         while (cursor < pending.length) {
             throwIfCancelled();
             const batch = pending.slice(cursor, cursor + batchSize);
@@ -1910,7 +2021,34 @@ async function generateSummary() {
             setStatus(`stage 1/2: recording batch ${batchNo}/${totalBatches} (${batch.length} messages)...`);
 
             const hasHeaders = useHeaders(batch);
+
+            // The seam: absorbed messages that come before this batch. On the first
+            // batch of a run that is the tail of the previous run; on a later batch
+            // it is the batch just recorded, which is exactly the place the record
+            // has to be continued from.
+            const firstIdx = chat.indexOf(batch[0]);
+            const before = firstIdx > 0 ? chat.slice(0, firstIdx) : [];
+            const seam = [];
+            for (let i = before.length - 1; i >= 0 && seam.length < overlapLimit; i--) {
+                const m = before[i];
+                if (m && m.is_system && m[SUMMARIZED_FLAG]) seam.unshift(m);
+            }
+            const seamHasHeaders = seam.length > 0 && useHeaders(seam);
+            const seamText = seam.length
+                ? formatMessagesForArchive(seam, {
+                    maxChars: perMessageCharLimit(800, seam.length),
+                    useHeaders: seamHasHeaders,
+                    title: chatTitle(),
+                })
+                : '';
+
+            const recordSoFar = recordTailText(recordTailBudget);
+
             const chronPrompt = guardrail() + buildSummaryPrompt(CHRONICLE_PROMPT_TEMPLATE, {
+                '{{current_record}}': recordSoFar
+                    || '(there is no record yet — this is the first one, so Day 1 is where it starts)',
+                '{{recent_archived}}': seamText
+                    || '(nothing recorded before this yet)',
                 '{{new_messages}}': formatMessagesForArchive(batch, {
                     maxChars: perBatchChars,
                     useHeaders: hasHeaders,
@@ -1955,6 +2093,7 @@ async function generateSummary() {
             }
             state.lastArchiveProblem = '';
             cursor += batch.length;
+            archivedThisRun.push(...batch);
 
             // Commit per batch: the watermark only advances over what is already
             // in the archive, so a cancel or crash never re-arches or skips it.
@@ -2049,8 +2188,32 @@ async function generateSummary() {
             log('Stage 2: recent answers', recent.length, '| per-message limit', perMsgChars, 'chars',
                 '| headers stripped:', hasHeaders);
 
+            // The messages this run absorbed, shown as themselves rather than
+            // only as the record's rendering of them. They are hidden from the
+            // prompt now, so without this block the newest part of the story
+            // reaches the summariser at one remove.
+            const newBudget = Math.max(500, Math.round(fitted.recent * 0.5 * scale));
+            const newMessagesText = archivedThisRun.length
+                ? formatMessagesForSummary(stripHeaders(archivedThisRun), {
+                    maxChars: perMessageCharLimit(newBudget * 4, archivedThisRun.length),
+                })
+                : '';
+
+            // The seam: absorbed messages from before this run, so the model can
+            // see where the previous summary left off.
+            const seamList = absorbedMessages(overlapLimit).filter(m => !archivedThisRun.includes(m));
+            const seamText = seamList.length
+                ? formatMessagesForSummary(stripHeaders(seamList), {
+                    maxChars: perMessageCharLimit(2000, seamList.length),
+                })
+                : '';
+            log('Stage 2: new messages', archivedThisRun.length, '(budget ~' + newBudget + ' tokens)',
+                '| seam', seamList.length, 'message(s)');
+
             return {
                 recentText,
+                newMessagesText,
+                seamText,
                 recordText: kept.join('\n\n') || '(the record is empty so far)',
             };
         };
@@ -2060,6 +2223,8 @@ async function generateSummary() {
             summaryText: state.summary,
             recordText: material.recordText,
             recentText: material.recentText,
+            newMessagesText: material.newMessagesText,
+            seamText: material.seamText,
         });
         log('Stage 2: prompt ~' + estimateTokens(sumPrompt) + ' tokens');
 
@@ -2074,6 +2239,8 @@ async function generateSummary() {
                 summaryText: state.summary,
                 recordText: material.recordText,
                 recentText: material.recentText,
+                newMessagesText: material.newMessagesText,
+                seamText: material.seamText,
             });
             log('Stage 2: the request did not fit — retrying with ~' + Math.round(scale * 100) +
                 '% of the material, ~' + estimateTokens(sumPrompt) + ' tokens');
@@ -2862,6 +3029,15 @@ function createUI() {
             </div>
             <div class="enhanced-summary-row">
                 <label class="enhanced-summary-label">
+                    Archived messages shown as the seam:
+                    <input type="number" id="es_overlap" value="${settings.overlapMessages ?? 6}" min="0" max="40" step="1" style="width: 70px;">
+                </label>
+            </div>
+            <div class="enhanced-summary-row es-note">
+                <span>The last already-absorbed messages, sent to both stages so the model can see where the last pass stopped and continue from there.</span>
+            </div>
+            <div class="enhanced-summary-row">
+                <label class="enhanced-summary-label">
                     Retry attempts on failure:
                     <input type="number" id="es_retry_attempts" value="${settings.retryAttempts}" min="0" max="10" style="width: 60px;">
                 </label>
@@ -3323,6 +3499,12 @@ function bindUIEvents() {
     document.getElementById('es_record_batch')?.addEventListener('change', (e) => {
         settings.recordBatchSize = Math.max(5, Math.min(400, parseInt(e.target.value) || 30));
         e.target.value = settings.recordBatchSize;
+        saveSettingsDebounced();
+    });
+
+    document.getElementById('es_overlap')?.addEventListener('change', (e) => {
+        settings.overlapMessages = Math.max(0, Math.min(40, parseInt(e.target.value) || 0));
+        e.target.value = settings.overlapMessages;
         saveSettingsDebounced();
     });
 
