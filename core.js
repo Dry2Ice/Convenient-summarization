@@ -540,11 +540,31 @@ export function reasoningText(data) {
 }
 
 /**
- * Explain an answer that turned out to be empty, instead of leaving "empty
- * response" on screen with no idea which of the four causes it actually was.
+ * Why a body that arrived successfully carried no usable answer.
+ *
+ * A backend error inside a 200 response is the case worth explaining: the
+ * provider accepted the request and then failed to serve it, and its own wording
+ * ("Request error", "upstream timeout") says nothing about what to do next. It
+ * gets classified here so the status line can say whether to wait, shrink the
+ * request, change endpoint, or stop trying.
  */
 export function describeEmptyAnswer({ error = '', reasoning = '', finishReason = '', parsed = true, contentType = '' } = {}) {
-    if (error) return `the backend answered with an error: ${error}`;
+    if (error) {
+        const said = String(error).slice(0, 200);
+        if (/content[_ -]?filter|safety|policy|blocked by|prohibited|nsfw|illegal/i.test(said)) {
+            return `the backend refused this material (${said}) — its filter stopped the request before any text came back. That backend will not archive this chat; point summarization at another endpoint.`;
+        }
+        if (/unavailable|overload|busy|capacity|temporar|try again|upstream|no available|exhaust|queue/i.test(said)) {
+            return `the backend was temporarily unable to serve the request (${said}). Nothing is wrong with the request — the same one usually works on a later attempt, or from a different endpoint.`;
+        }
+        if (/too large|too long|token|limit exceeded|context|payload|request size|413|400/i.test(said)) {
+            return `the backend rejected the request as too large (${said}). Lower the recent-answer or record budget, or lower the output limit.`;
+        }
+        if (/unauthor|forbidden|api key|401|403|invalid.*key|quota|credit|balance/i.test(said)) {
+            return `the backend refused the request itself (${said}). This is a connection or key problem, not a prompt problem.`;
+        }
+        return `the backend answered with an error and no text (${said}). It refused the request before generating — retrying usually helps when the connection is a free or relayed one.`;
+    }
     if (reasoning) {
         return 'the model spent the whole answer budget on reasoning and returned no answer — raise "max output tokens", or archive with a model that does not think out loud';
     }

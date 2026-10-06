@@ -1151,9 +1151,17 @@ async function callCustomAPI(prompt, settings) {
     const content = parsed ? extractCompletionText(data) : '';
     if (content.trim()) return content;
 
+    const bodyError = parsed ? completionErrorText(data) : '';
+    if (bodyError) {
+        log(`${label}: ${endpoint} answered HTTP ${response.status} with an error and no text — ` +
+            `"${String(bodyError).slice(0, 300)}"` +
+            (parsed ? '' : ` | raw body: ${raw.slice(0, 300)}`));
+    }
+
     return {
+        backendError: Boolean(bodyError),
         emptyReason: describeEmptyAnswer({
-            error: parsed ? completionErrorText(data) : '',
+            error: bodyError,
             reasoning: parsed ? reasoningText(data) : '',
             finishReason: data?.choices?.[0]?.finish_reason || data?.stop_reason || '',
             parsed,
@@ -1386,6 +1394,7 @@ async function directCompletion(prompt, label) {
 
     const finishReason = Array.isArray(data?.choices) ? data.choices[0]?.finish_reason : '';
     const content = stream.text || (parsed ? extractCompletionText(data) : '');
+    const bodyError = stream.error || (parsed ? completionErrorText(data) : '');
 
     // A provider that filters the output reports it here while leaving the
     // visible content null. It looks like an empty reply unless we name it.
@@ -1400,15 +1409,25 @@ async function directCompletion(prompt, label) {
 
     if (content.trim()) return content;
 
+    // A 200 carrying an error is the failure with the least to go on: the status
+    // says success and the provider's own wording is often a bare phrase. Both
+    // go to the log here, where they can be read, before the run reduces the
+    // failure to a one-line reason.
+    if (bodyError) {
+        log(`${label}: ${source} answered HTTP ${response.status} with an error and no text — ` +
+            `"${String(bodyError).slice(0, 300)}"` +
+            (parsed ? '' : ` | raw body: ${raw.slice(0, 300)}`));
+    }
+
     const note = describeEmptyAnswer({
-        error: stream.error || (parsed ? completionErrorText(data) : ''),
+        error: bodyError,
         reasoning: stream.reasoning || (parsed ? reasoningText(data) : ''),
         finishReason: finishReason || '',
         parsed,
         contentType: response.headers.get('content-type') || '',
     });
     log(`${label}: empty answer from ${source} — ${note}`);
-    return { emptyReason: note };
+    return { emptyReason: note, backendError: Boolean(bodyError) };
 }
 
 /**
@@ -1670,6 +1689,10 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
             if (answer && typeof answer === 'object') {
                 const err = new Error(answer.emptyReason || 'the model returned an empty answer');
                 err.isEmptyResponse = true;
+                // A body that came back carrying the provider's own error is a
+                // request it refused to serve, not an answer that came out blank,
+                // and the advice given on the last attempt is different.
+                if (answer.backendError) err.isBackendError = true;
                 if (isContextLengthError(err)) err.isContextLength = true;
                 throw err;
             }
@@ -1719,7 +1742,14 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
 
             const isLast = attempt === maxRetries;
             if (isLast) {
-                throw new Error(`${label}: ${reason}`);
+                // Archival requests ride the chat's own connection unless the addon
+                // was given one of its own, and a chat connection is often a free or
+                // relayed one that fails in ways the request cannot fix. Saying so
+                // is the difference between a dead end and a settings change.
+                const hint = error.isBackendError && !settings.useCustomAPI
+                    ? ' Archival requests are riding the chat\'s own connection — set "send archival requests to my own endpoint" in the settings to use one that answers.'
+                    : '';
+                throw new Error(`${label}: ${reason}${hint}`);
             }
 
             // The pause between attempts is the longest silent stretch in the

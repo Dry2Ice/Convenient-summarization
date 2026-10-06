@@ -114,12 +114,28 @@ empty is reported with its cause rather than as "empty response":
 - *cut off by the output limit* — same cause, named from the provider's side.
 - *answered with something that is not JSON* — a proxy or gateway answered
   instead of the model.
-- *answered with an error* — the backend reported an error inside a successful
-  response; the provider's own message is shown.
-- *the request did not fit* — the archive lines and the live edge are cut to
+- *the backend refused this material* — its filter stopped the request before
+  any text came back. That backend will not archive this chat; point
+  summarization at another endpoint.
+- *the backend was temporarily unable to serve the request* — a free or relayed
+  connection that could not route the call at that moment. Nothing is wrong with
+  the request; it usually works on a later attempt.
+- *rejected the request as too large* — lower the recent-answer or record budget,
+  or the output limit.
+- *the backend refused the request itself* — a connection or key problem, not a
+  prompt problem.
+- *answered with an error and no text* — anything else the provider reported
+  inside a successful response. Its own words are always shown, and the status,
+  endpoint and model are written to the console for that attempt.
+- *the request did not fit* — the record and the live edge are cut to
   what the window can take after the instructions, and the stage is retried at
   half the material if that is still not enough. The status line names the
   budgets it settled on.
+
+Archival requests use whatever connection the chat is on, unless *send archival
+requests to my own endpoint* is turned on. A chat connection that is a free tier
+or a relay is the usual reason a run fails for no reason the prompt can be
+blamed for, so the last word of a backend error says so.
 
 Everything is logged to the browser console under `[enhancedSummary]`: the source,
 the model, the prompt size, the budgets, the elapsed time and the reason for

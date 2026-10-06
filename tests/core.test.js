@@ -1082,12 +1082,26 @@ test('reasoning returned separately from the answer is recognised', () => {
 });
 
 test('an empty answer says which of the causes it was', () => {
-    assert.match(describeEmptyAnswer({ error: 'quota exceeded' }), /quota exceeded/);
     assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /spent the whole answer budget on reasoning/);
     assert.match(describeEmptyAnswer({ finishReason: 'length' }), /cut off by the output limit/);
     assert.match(describeEmptyAnswer({ parsed: false, contentType: 'text/html' }), /text\/html instead of JSON/);
     assert.match(describeEmptyAnswer({ finishReason: 'stop' }), /finish_reason: stop/);
     assert.match(describeEmptyAnswer({}), /empty answer/);
+});
+
+test('a backend error inside a 200 is classified, not echoed', () => {
+    // The bare phrase a relayed endpoint returns when it cannot serve the
+    // request. Saying it again teaches nobody anything.
+    assert.match(describeEmptyAnswer({ error: 'Request error' }), /refused the request before generating/);
+    // A free or relayed backend that is momentarily out of capacity: the same
+    // request is fine later, so this must not read as a prompt problem.
+    assert.match(describeEmptyAnswer({ error: 'no available provider' }), /temporarily unable to serve/);
+    assert.match(describeEmptyAnswer({ error: 'upstream busy, try again' }), /temporarily unable to serve/);
+    assert.match(describeEmptyAnswer({ error: 'content filtered by policy' }), /will not archive this chat/);
+    assert.match(describeEmptyAnswer({ error: 'input too large for this model' }), /too large/);
+    assert.match(describeEmptyAnswer({ error: 'invalid api key' }), /connection or key problem/);
+    // Whatever the class, the provider's own words survive.
+    assert.match(describeEmptyAnswer({ error: 'Request error' }), /Request error/);
 });
 
 test('a streamed answer is assembled from whatever frames the provider sends', () => {
