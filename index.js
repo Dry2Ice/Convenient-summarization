@@ -1914,6 +1914,25 @@ async function maybeCondenseRecord() {
 }
 
 /**
+ * Where a message sits in the chat, so a block of it can carry the chat's own
+ * numbering.
+ *
+ * Without this, the seam and the new messages each start again at "#0", and the
+ * model is handed two different messages under the same number — one it is told
+ * to leave alone and one it is told to write up.
+ */
+function positionInChat(message) {
+    const chat = getContext().chat || [];
+    const startIndex = chat.indexOf(message);
+    if (startIndex < 0) return { startIndex: 0, startExchange: 0 };
+    let startExchange = 0;
+    for (let i = 0; i < startIndex; i++) {
+        if (chat[i] && chat[i].is_user) startExchange++;
+    }
+    return { startIndex, startExchange };
+}
+
+/**
  * The last few messages the record already covers.
  *
  * These are the seam: without them the model sees the finished document and then
@@ -2038,6 +2057,10 @@ async function generateSummary() {
                 ? formatMessagesForArchive(seam, {
                     maxChars: perMessageCharLimit(800, seam.length),
                     useHeaders: seamHasHeaders,
+                    // The seam is absorbed by definition, so the default filter
+                    // would throw all of it away.
+                    includeHidden: true,
+                    ...positionInChat(seam[0]),
                     title: chatTitle(),
                 })
                 : '';
@@ -2054,6 +2077,7 @@ async function generateSummary() {
                     useHeaders: hasHeaders,
                     // A group chat titles its messages with the chat name, and that
                     // name is not a speaker.
+                    ...positionInChat(batch[0]),
                     title: chatTitle(),
                 }),
                 '{{part_label}}': totalBatches > 1
@@ -2193,9 +2217,15 @@ async function generateSummary() {
             // prompt now, so without this block the newest part of the story
             // reaches the summariser at one remove.
             const newBudget = Math.max(500, Math.round(fitted.recent * 0.5 * scale));
+            // The record already carries the times, so the header is stripped here
+            // rather than printed twice.
             const newMessagesText = archivedThisRun.length
-                ? formatMessagesForSummary(stripHeaders(archivedThisRun), {
+                ? formatMessagesForArchive(stripHeaders(archivedThisRun), {
                     maxChars: perMessageCharLimit(newBudget * 4, archivedThisRun.length),
+                    useHeaders: false,
+                    includeHidden: true,
+                    ...positionInChat(archivedThisRun[0]),
+                    title: chatTitle(),
                 })
                 : '';
 
@@ -2203,8 +2233,12 @@ async function generateSummary() {
             // see where the previous summary left off.
             const seamList = absorbedMessages(overlapLimit).filter(m => !archivedThisRun.includes(m));
             const seamText = seamList.length
-                ? formatMessagesForSummary(stripHeaders(seamList), {
+                ? formatMessagesForArchive(stripHeaders(seamList), {
                     maxChars: perMessageCharLimit(2000, seamList.length),
+                    useHeaders: false,
+                    includeHidden: true,
+                    ...positionInChat(seamList[0]),
+                    title: chatTitle(),
                 })
                 : '';
             log('Stage 2: new messages', archivedThisRun.length, '(budget ~' + newBudget + ' tokens)',

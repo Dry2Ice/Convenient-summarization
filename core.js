@@ -866,10 +866,17 @@ export function shouldDetectHeaders(messages) {
  * which has no request before it, is marked as such instead of looking like a
  * reply to nothing. The index is also what the record has to bring back.
  */
-export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true, startIndex = 0, title = '' } = {}) {
-    const list = (messages || []).filter(m => m && !m.is_system);
+export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders = true, startIndex = 0, startExchange = 0, title = '', includeHidden = false } = {}) {
+    // Hidden messages are dropped unless the caller has already decided which
+    // ones it wants: the seam and a run's own messages are absorbed by the time
+    // they are sent, so refusing them here would empty the block silently.
+    const list = (messages || []).filter(m => m && (includeHidden || !m.is_system));
     const chatTitle = String(title || '').trim().toLowerCase();
-    let exchange = 0;
+    // The numbering continues the chat's, so the same message cannot appear as
+    // "#0" twice in one prompt — which reads as the model being handed the same
+    // message twice, once to write up and once to leave alone.
+    let exchange = Math.max(0, Math.floor(startExchange) || 0);
+    const firstExchange = exchange;
     let awaitingReply = false;
 
     return list.map((m, i) => {
@@ -878,8 +885,12 @@ export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders
             exchange++;
             awaitingReply = true;
         }
-        // An assistant turn with no request before it opens the conversation.
-        const role = isUser ? 'user' : (exchange === 0 ? 'opening' : (awaitingReply ? 'reply' : 'extra'));
+        // An assistant turn with no request before it opens the conversation —
+        // unless the block itself starts halfway through an earlier exchange, in
+        // which case the request is before the block and the turn is a reply.
+        const startsMidExchange = i === 0 && firstExchange > 0 && !awaitingReply;
+        const role = isUser ? 'user'
+            : (startsMidExchange ? 'reply' : (exchange === firstExchange ? 'opening' : (awaitingReply ? 'reply' : 'extra')));
         if (!isUser) awaitingReply = false;
 
         // The speaker is named, never "User" or "Assistant": those labels end up
@@ -904,10 +915,16 @@ export function formatMessagesForArchive(messages, { maxChars = 1200, useHeaders
     }).join('\n\n');
 }
 
-/** Remove headers from a batch of messages without otherwise altering them. */
+/**
+ * Remove headers from a batch of messages without otherwise altering them.
+ *
+ * Applied to hidden messages too: a run's own messages are absorbed by the time
+ * they reach the summary request, and leaving their Date/Time headers in the body
+ * would print the header twice — once stripped, once inline.
+ */
 export function stripHeaders(messages) {
     return (messages || []).map(m => {
-        if (!m || m.is_system) return m;
+        if (!m) return m;
         const parsed = parseMessageHeader(m.mes);
         return parsed.found ? { ...m, mes: parsed.body } : m;
     });

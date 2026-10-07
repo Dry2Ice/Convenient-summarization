@@ -642,6 +642,55 @@ test('a message titled with the chat name is not presented as a speaker', () => 
     assert.match(out, /Narrator: The rain had stopped by then\./);
 });
 
+test('a block that starts mid-conversation keeps the chat\'s own numbering', () => {
+    // The seam and a run's own messages are two blocks of one chat. Numbered from
+    // zero each, they put a different message under the same "#0", which reads as
+    // the same message being handed over twice — once to write up, once to leave
+    // alone — and the model resolves that contradiction badly.
+    const seam = [
+        { is_user: false, is_system: true, name: 'Julia', mes: 'the tail of exchange 3' },
+        { is_user: true, name: 'Julie', mes: 'and the start of exchange 4' },
+    ];
+    const out = formatMessagesForArchive(seam, {
+        useHeaders: false, includeHidden: true, startIndex: 40, startExchange: 3,
+    });
+
+    assert.match(out, /\[#40 · exchange 3 · reply\]/, 'continues the exchange, not an "opening"');
+    assert.match(out, /\[#41 · exchange 4 · user\]/);
+    // A real conversation still opens the way it always did.
+    const opening = formatMessagesForArchive([{ is_user: false, name: 'Julia', mes: 'The rain had stopped.' }], { useHeaders: false });
+    assert.match(opening, /\[#0 · exchange 0 · opening\]/);
+});
+
+test('an absorbed message survives only when the caller asks for it', () => {
+    // The seam and a run's own messages are hidden by the time they are sent.
+    // Filtered out by default, the seam block came back empty and the prompt
+    // claimed nothing had been recorded before it — the opposite of the truth.
+    const absorbed = { is_user: false, is_system: true, name: 'Julia', mes: 'The kettle clicked off.' };
+    const live = { is_user: false, name: 'Julia', mes: 'She came back from the window.' };
+
+    assert.ok(!formatMessagesForArchive([absorbed], { useHeaders: false }).includes('kettle'),
+        'hidden messages are dropped by default');
+
+    const withHidden = formatMessagesForArchive([absorbed, live], { useHeaders: false, includeHidden: true });
+    assert.match(withHidden, /Julia: The kettle clicked off\./);
+    assert.match(withHidden, /Julia: She came back from the window\./);
+    // The label that marks a message as excluded must never be its speaker.
+    assert.ok(!/System:/.test(withHidden), 'an absorbed message is not a system message to the model');
+});
+
+test('a hidden message has its header stripped like any other', () => {
+    // Otherwise the summary request prints the Date/Time twice: once stripped
+    // from the block, once left inline in the body.
+    const out = stripHeaders([{
+        is_user: false, is_system: true, name: 'Julia',
+        mes: 'Date: July 13, 2025\nTime: 8:31 AM\nLocation: Pier\n\nBody.',
+    }]);
+    assert.match(out[0].mes, /Body\./);
+    assert.ok(!/^Date:/m.test(out[0].mes), 'the header is gone even though the message is hidden');
+    assert.equal(out[0].name, 'Julia', 'nothing else about the message changed');
+});
+
 test('formatMessagesForArchive can leave the header inline when disabled', () => {
     const msgs = [{ is_user: false, name: 'Julia', mes: 'Date: July 13, 2025\nLocation: Pier\n\nBody.' }];
     const out = formatMessagesForArchive(msgs, { useHeaders: false });
@@ -660,14 +709,14 @@ test('stripHeaders removes the block but keeps the message intact otherwise', ()
     assert.equal(out[1].mes, 'Plain message.');
 });
 
-test('stripHeaders leaves system messages and headerless text alone', () => {
+test('stripHeaders strips a header and leaves headerless text alone', () => {
     const msgs = [
-        { is_system: true, mes: 'Date: July 13, 2025\n\nSystem.' },
+        { mes: 'Date: July 13, 2025\n\nSystem.' },
         { is_user: true, mes: 'Plain.' },
     ];
     const out = stripHeaders(msgs);
-    assert.equal(out[0], msgs[0]);
-    assert.equal(out[1], msgs[1]);
+    assert.equal(out[0].mes, 'System.');
+    assert.equal(out[1], msgs[1], 'a message with no header is passed through untouched');
 });
 
 test('the extension owns its output limit instead of inheriting the chat one', () => {
@@ -1396,7 +1445,9 @@ test('both stages are given the record, the seam and the new material, each labe
     // are hidden from the prompt by then, so the record is their only other trace.
     assert.match(src, /const archivedThisRun = \[\]/);
     assert.match(src, /archivedThisRun\.push\(\.\.\.batch\)/);
-    assert.match(src, /formatMessagesForSummary\(stripHeaders\(archivedThisRun\)/);
+    assert.match(src, /formatMessagesForArchive\(stripHeaders\(archivedThisRun\)/);
+    assert.match(src, /includeHidden: true/,
+        'a run\'s own messages and the seam are hidden by the time they are sent');
 
     // And the seam is configurable, because how much is enough is a judgement
     // the user has to be able to make.

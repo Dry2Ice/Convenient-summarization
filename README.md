@@ -68,6 +68,12 @@ SillyTavern.
      explicitly *not* to be written up again, so it can see exactly where the last
      pass stopped.
    - **New messages** — the only part it writes.
+
+   When a run takes several batches, every batch after the first is assembled the
+   same way from what is already there: the tail of the record includes the blocks
+   the previous batch of that same run wrote, and the seam is the batch it just
+   recorded. Message numbers continue across blocks, so the same message is never
+   printed under the same number twice.
 2. **Exclude.** Absorbed messages are marked with SillyTavern's own
    `is_system` flag — the same one its *Exclude message from prompts* button
    uses. The prompt builder drops them, the chat keeps them in full, and any
