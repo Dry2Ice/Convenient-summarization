@@ -1248,6 +1248,23 @@ test('a cut-off stream is told apart from a stream that ended cleanly', () => {
         'a stream that ended cleanly is not described as cut off');
 });
 
+test('a zero count says which of the three zeroes it is', async () => {
+    // A bare "0" reads as a broken counter, and it is shown constantly: on a chat
+    // shorter than the raw tail there is nothing eligible, and on a recorded chat
+    // nothing is left. Both need saying out loud.
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    assert.match(src, /function archiveCountReason\(\)/);
+    assert.match(src, /es_msg_count_note/);
+    assert.match(src, /kept raw/, 'the raw tail is named as the reason');
+    assert.match(src, /more before it runs on its own/);
+    assert.match(src, /everything up to the raw tail is recorded/);
+
+    // And the arithmetic it rests on is unchanged: the eligible range is the
+    // watermark through the message before the tail.
+    assert.match(src, /const range = computeArchiveRange\(\{[\s\S]*?watermark: state\.lastSummarizedIndex/);
+    assert.match(src, /keepLast: Math\.max\(0, settings\.keepLastMessages\)/);
+});
+
 test('an empty answer says which of the causes it was', () => {
     assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /returned reasoning/);
     assert.match(describeEmptyAnswer({ finishReason: 'length' }), /cut off by the output limit/);

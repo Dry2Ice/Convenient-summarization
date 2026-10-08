@@ -88,6 +88,17 @@
     color: var(--SmartThemeBodyColor);
 }
 
+/* The reason a count is what it is. Italic and quiet like a note, but never so
+   faint that the only clue to a stalled counter is its absence. */
+.es-count-note {
+    display: block;
+    margin: 2px 0 4px;
+    font-size: 0.8em;
+    font-style: italic;
+    opacity: 0.85;
+    color: var(--SmartThemeBodyColor);
+}
+
 .es-section-head {    margin-top: 6px;
     padding-top: 8px;
     border-top: 1px solid var(--SmartThemeBorderColor);

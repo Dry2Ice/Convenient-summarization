@@ -958,6 +958,34 @@ function getUnsummarizedMessages() {
         .filter(m => !m.is_system && !m[SUMMARIZED_FLAG]);
 }
 
+/**
+ * Why the unarchived count is what it is.
+ *
+ * A bare zero tells the reader nothing and looks like a counter that has stopped
+ * working: on a chat shorter than the raw tail there is simply nothing eligible,
+ * and on a chat that has been recorded there is simply nothing left. Both read
+ * as broken, so the arithmetic is spelled out instead.
+ */
+function archiveCountReason() {
+    const settings = getSettings();
+    const pending = getUnsummarizedMessages().length;
+    const chat = getContext().chat || [];
+    const keepLast = Math.max(0, settings.keepLastMessages);
+    const threshold = Math.max(1, settings.summarizeEvery);
+
+    if (pending > 0) {
+        return threshold > pending
+            ? `${threshold - pending} more before it runs on its own`
+            : 'past the trigger — a run starts on the next message';
+    }
+    if (chat.length <= keepLast) {
+        const short = keepLast + 1 - chat.length;
+        return `the last ${keepLast} messages are kept raw, and this chat has ${chat.length}: ` +
+            `nothing is eligible yet (${short} more message${short === 1 ? '' : 's'})`;
+    }
+    return `everything up to the raw tail is recorded (${chat.length} messages, last ${keepLast} kept raw)`;
+}
+
 function getRecentMessages() {
     const settings = getSettings();
     const chat = getContext().chat;
@@ -3325,6 +3353,7 @@ function createUI() {
                     Status: <span id="es_status">idle</span><br>
                     Coverage: <span id="es_coverage"></span><br>
                     Unarchived messages: <span id="es_msg_count">${getUnsummarizedMessages().length}</span> / triggers at ${settings.summarizeEvery}<br>
+                    <span id="es_msg_count_note" class="es-count-note">${archiveCountReason()}</span><br>
                     Recorded through message: <span id="es_watermark">${state.lastSummarizedIndex}</span><br>
                     Excluded from the prompt now: <span id="es_excluded_count">0</span><br>
                     Record: <span id="es_record_count">${recordStats(state.record).blocks} blocks</span>, ~${formatTokens(recordStats(state.record).tokens)} tokens<br>
@@ -3824,6 +3853,8 @@ function updateUI() {
     const stats = recordStats(state.record);
 
     if (msgCountEl) msgCountEl.textContent = getUnsummarizedMessages().length;
+    const msgNoteEl = document.getElementById('es_msg_count_note');
+    if (msgNoteEl) msgNoteEl.textContent = archiveCountReason();
     if (coverageEl) coverageEl.textContent = archiveCoverageText();
     if (summaryLenEl) summaryLenEl.textContent = estimateTokens(state.summary);
     // An open editor owns its text; refreshing the view under it would throw
