@@ -9,6 +9,7 @@ import {
     extractStreamText,
     completionErrorText,
     reasoningText,
+    responseShape,
     describeEmptyAnswer,
     fitStage2Budgets,
     looksTruncatedRevision,
@@ -1218,6 +1219,8 @@ async function callCustomAPI(prompt, settings) {
         emptyReason: describeEmptyAnswer({
             error: bodyError,
             reasoning: parsed ? reasoningText(data) : '',
+            reasoningTokens: parsed ? estimateTokens(reasoningText(data)) : 0,
+            fields: parsed ? responseShape(data) : '',
             finishReason: data?.choices?.[0]?.finish_reason || data?.stop_reason || '',
             parsed,
             contentType: response.headers.get('content-type') || '',
@@ -1477,6 +1480,8 @@ async function directCompletion(prompt, label) {
     const note = describeEmptyAnswer({
         error: bodyError,
         reasoning: stream.reasoning || (parsed ? reasoningText(data) : ''),
+        reasoningTokens: estimateTokens(stream.reasoning || (parsed ? reasoningText(data) : '')),
+        fields: parsed ? responseShape(data) : responseShape(null),
         finishReason: finishReason || '',
         parsed,
         contentType: response.headers.get('content-type') || '',
@@ -1791,6 +1796,21 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
                 if (smaller) {
                     prompt = smaller;
                     promptTokens = estimateTokens(prompt);
+                    continue;
+                }
+            }
+
+            // Reasoning with no answer behind it is worth one smaller try rather
+            // than the identical request: a shorter input leaves the model more
+            // room to finish, and repeating it unchanged asks the same question in
+            // the same breath.
+            if (error.isEmptyResponse && !isContextLengthError(error)
+                && typeof shrink === 'function' && !attempt) {
+                const smaller = shrink();
+                if (smaller) {
+                    prompt = smaller;
+                    promptTokens = estimateTokens(prompt);
+                    log(`${label}: no answer behind the reasoning — one smaller attempt before giving up`);
                     continue;
                 }
             }
@@ -2162,14 +2182,19 @@ async function generateSummary() {
         // error into "empty response" on every attempt.
         const scaffolding = estimateTokens(
             guardrail() + SUMMARY_STAGE2_FRAMING + (settings.summaryPrompt || SUMMARY_PROMPT_TEMPLATE));
+        const outputLimit = responseLengthFor(0);
         const fitted = fitStage2Budgets({
             window: getContextWindow(),
             share: settings.contextWindowShare ?? 0.3,
             overheadTokens: scaffolding,
             archiveTokens: budgetFor(settings.stage2RecordTokens),
             recentTokens: budgetFor(settings.recentAnswerTokens),
+            // The answer's room is reserved before the material is sized, so a
+            // request can never ask for more output than the window has left.
+            outputTokens: outputLimit,
         });
-        log('Stage 2: scaffolding ~' + scaffolding + ' tokens | record budget ' +
+        log('Stage 2: scaffolding ~' + scaffolding + ' tokens | output limit ' +
+            (outputLimit || 'inherited') + ' | record budget ' +
             fitted.archive + ' | recent budget ' + fitted.recent +
             (fitted.capped ? ' | CAPPED (' + fitted.cappedBy + ')' : '') +
             (fitted.cappedBy === 'window' ? ' | usable ' + fitted.usable + ' of a ' + getContextWindow() + ' window' : ''));

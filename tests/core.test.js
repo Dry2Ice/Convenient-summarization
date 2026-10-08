@@ -1130,12 +1130,67 @@ test('reasoning returned separately from the answer is recognised', () => {
     assert.equal(reasoningText(null), '');
 });
 
+test('reasoning is read from every field providers use, and from every frame', () => {
+    // One field name was read, so a gateway using any other looked exactly like a
+    // model that returned no answer at all.
+    assert.equal(reasoningText({ choices: [{ message: { reasoning_content: 'a' } }] }), 'a');
+    assert.equal(reasoningText({ choices: [{ delta: { reasoning: 'b' } }] }), 'b');
+    assert.equal(reasoningText({ choices: [{ message: { thinking: 'c' } }] }), 'c');
+    assert.equal(reasoningText({ reasoning_content: 'd' }), 'd');
+    assert.equal(reasoningText({ candidates: [{ content: { parts: [{ text: 'e', thought: true }] } }] }), 'e');
+    // A streamed answer arrives a fragment at a time; the total is what says
+    // whether the budget was consumed, so every fragment has to be kept.
+    const stream = extractStreamText([
+        'data: {"choices":[{"delta":{"reasoning_content":"one "}}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"two"}}]}',
+        'data: [DONE]',
+    ].join('\n\n'));
+    assert.equal(stream.reasoning, 'one two');
+    assert.equal(stream.text, '', 'and no content, which is the case worth explaining');
+});
+
+test('the room an answer needs is reserved before the material is sized', () => {
+    // Otherwise the request can ask for more output than the window has left, and
+    // it fails in a way that looks like the model misbehaving.
+    const window = 81000;
+    const base = { window, share: 0.9, overheadTokens: 4000, archiveTokens: 44000, recentTokens: 32000 };
+
+    const greedy = fitStage2Budgets(base);
+    const reserved = fitStage2Budgets({ ...base, outputTokens: 64000 });
+    assert.ok(reserved.usable < greedy.usable, 'the output limit comes off the material budget');
+    assert.equal(reserved.archive + reserved.recent, reserved.usable);
+    assert.equal(reserved.output, 64000);
+    // With the room for an answer taken first, input and output both fit.
+    assert.ok(reserved.usable + 4000 + 64000 < window);
+
+    // A window unknown to us is unchanged: nothing is invented.
+    assert.equal(fitStage2Budgets({ ...base, window: 0, outputTokens: 64000 }).usable, Infinity);
+});
+
 test('an empty answer says which of the causes it was', () => {
-    assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /spent the whole answer budget on reasoning/);
+    assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /returned reasoning/);
     assert.match(describeEmptyAnswer({ finishReason: 'length' }), /cut off by the output limit/);
     assert.match(describeEmptyAnswer({ parsed: false, contentType: 'text/html' }), /text\/html instead of JSON/);
     assert.match(describeEmptyAnswer({ finishReason: 'stop' }), /finish_reason: stop/);
     assert.match(describeEmptyAnswer({}), /empty answer/);
+});
+
+test('the reasoning failure reports a measurement, not a conclusion', () => {
+    // This message used to say the model "spent the whole answer budget on
+    // reasoning", which nothing had checked: the only test was that some
+    // reasoning had arrived and no content had. Two hundred tokens of thinking
+    // with the answer in an unread field produced exactly that message.
+    const small = describeEmptyAnswer({
+        reasoning: 'let me think', reasoningTokens: 2, fields: 'choices | choice: content, reasoning_content',
+    });
+    assert.match(small, /~2 tokens of it/);
+    assert.ok(!/spent the whole answer budget/i.test(small), 'no unmeasured claim about the budget');
+    assert.match(small, /choice: content, reasoning_content/, 'the response shape is quoted');
+    assert.match(small, /far below the output limit/);
+
+    const large = describeEmptyAnswer({ reasoning: 'x', reasoningTokens: 63800 });
+    assert.match(large, /~63800 tokens of it/);
+    assert.match(large, /not knowable from here/, 'even a large figure is not declared to be the whole budget');
 });
 
 test('a backend error inside a 200 is classified, not echoed', () => {

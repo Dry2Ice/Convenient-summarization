@@ -370,7 +370,7 @@ export function extractStreamText(raw) {
 
         frames++;
         if (!error) error = completionErrorText(data);
-        if (!reasoning) reasoning = reasoningText(data);
+        reasoning += reasoningText(data);
         text += extractCompletionText(data);
     }
 
@@ -399,18 +399,24 @@ export function fitStage2Budgets({
     archiveTokens = 0,
     recentTokens = 0,
     reserve = 2000,
+    outputTokens = 0,
 } = {}) {
     const archive = Math.max(0, archiveTokens);
     const recent = Math.max(0, recentTokens);
     const requested = archive + recent;
+    // The room an answer needs is taken off before the material is sized. Asking
+    // for 64k of output on a request of 80k is a request the backend cannot
+    // honour whatever the material says, and it fails in a way that looks like
+    // the model misbehaving.
+    const output = Math.max(0, Math.floor(Number(outputTokens) || 0));
 
     const known = Number.isFinite(window) && window > 0;
     if (!known) {
-        return { archive, recent, requested, usable: Infinity, capped: false, cappedBy: null };
+        return { archive, recent, requested, usable: Infinity, capped: false, cappedBy: null, output };
     }
 
     const ratio = Math.max(0.05, Math.min(0.9, Number(share) || 0.3));
-    let usable = Math.floor(window * ratio) - Math.max(0, reserve) - Math.max(0, overheadTokens);
+    let usable = Math.floor(window * ratio) - Math.max(0, reserve) - Math.max(0, overheadTokens) - output;
 
     // The summary request genuinely needs a large share of a small window, so a
     // third of it being too small for the instructions is not a reason to give
@@ -422,10 +428,10 @@ export function fitStage2Budgets({
     }
 
     // Nothing at all fits: better an honest zero than a request that cannot.
-    if (usable <= 0) return { archive: 0, recent: 0, requested, usable: 0, capped: true, cappedBy: 'overhead' };
+    if (usable <= 0) return { archive: 0, recent: 0, requested, usable: 0, capped: true, cappedBy: 'overhead', output };
 
     if (requested <= usable) {
-        return { archive, recent, requested, usable, capped: cappedBy === 'share', cappedBy: cappedBy === 'share' ? 'share' : null };
+        return { archive, recent, requested, usable, capped: cappedBy === 'share', cappedBy: cappedBy === 'share' ? 'share' : null, output };
     }
 
     // The live edge is what the summary must reflect, so it keeps its configured
@@ -441,6 +447,7 @@ export function fitStage2Budgets({
         usable,
         capped: true,
         cappedBy,
+        output,
     };
 }
 
@@ -528,15 +535,66 @@ export function completionErrorText(data) {
     return String(error.message || error.msg || error.detail || '').slice(0, 300);
 }
 
-/** The chain of thought a provider returned separately from the answer. */
+/**
+ * The chain of thought a provider returned separately from the answer.
+ *
+ * Every field the various providers use is read, not just the one ST happens to
+ * normalise. A gateway that returns reasoning under its own name would otherwise
+ * be invisible here, and a response with reasoning in an unread field is
+ * indistinguishable from one with no answer at all.
+ */
 export function reasoningText(data) {
-    const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
-    const separate = choice?.message?.reasoning_content ?? choice?.delta?.reasoning_content ?? data?.reasoning_content;
-    if (typeof separate === 'string') return separate;
-    if (Array.isArray(separate)) {
-        return separate.map(part => (typeof part === 'string' ? part : part?.text || '')).join('');
+    if (data === null || data === undefined) return '';
+    if (typeof data === 'string') return data;
+
+    const choice = Array.isArray(data.choices) ? data.choices[0] : null;
+    const fromChoice = choice
+        ? (choice.message ?? choice.delta ?? choice)
+        : null;
+
+    const parts = [];
+    const collect = (value) => {
+        if (typeof value === 'string' && value) parts.push(value);
+        else if (Array.isArray(value)) {
+            for (const part of value) {
+                if (typeof part === 'string') parts.push(part);
+                else if (part && typeof part.text === 'string') parts.push(part.text);
+            }
+        }
+    };
+
+    collect(fromChoice?.reasoning_content);
+    collect(fromChoice?.reasoning);
+    collect(fromChoice?.thinking);
+    collect(fromChoice?.thinking_content);
+    collect(data.reasoning_content);
+    collect(data.reasoning);
+    collect(data.thinking);
+    collect(data.thinking_content);
+
+    // Google marks its thinking parts rather than naming a field for them.
+    const googleParts = data.candidates?.[0]?.content?.parts ?? data.candidates?.[0]?.output?.parts;
+    if (Array.isArray(googleParts)) {
+        for (const part of googleParts) {
+            if (part && part.thought && typeof part.text === 'string') parts.push(part.text);
+        }
     }
-    return '';
+
+    return parts.join('');
+}
+
+/** The shape a response arrived in, so a missed field is visible in the log. */
+export function responseShape(data) {
+    if (data === null || data === undefined) return 'nothing';
+    if (typeof data === 'string') return 'a bare string';
+    const top = Object.keys(data).filter(k => !['id', 'object', 'created', 'model', 'usage', 'system_fingerprint'].includes(k));
+    const choice = Array.isArray(data.choices) ? data.choices[0] : null;
+    const inner = choice ? Object.keys(choice.message ?? choice.delta ?? choice) : [];
+    const parts = [
+        top.length ? top.join(', ') : '(no fields)',
+        inner.length ? `choice: ${inner.join(', ')}` : '',
+    ].filter(Boolean);
+    return parts.join(' | ');
 }
 
 /**
@@ -548,7 +606,7 @@ export function reasoningText(data) {
  * gets classified here so the status line can say whether to wait, shrink the
  * request, change endpoint, or stop trying.
  */
-export function describeEmptyAnswer({ error = '', reasoning = '', finishReason = '', parsed = true, contentType = '' } = {}) {
+export function describeEmptyAnswer({ error = '', reasoning = '', reasoningTokens = 0, fields = '', finishReason = '', parsed = true, contentType = '' } = {}) {
     if (error) {
         const said = String(error).slice(0, 200);
         if (/content[_ -]?filter|safety|policy|blocked by|prohibited|nsfw|illegal/i.test(said)) {
@@ -566,7 +624,19 @@ export function describeEmptyAnswer({ error = '', reasoning = '', finishReason =
         return `the backend answered with an error and no text (${said}). It refused the request before generating — retrying usually helps when the connection is a free or relayed one.`;
     }
     if (reasoning) {
-        return 'the model spent the whole answer budget on reasoning and returned no answer — raise "max output tokens", or archive with a model that does not think out loud';
+        // What is known: reasoning came back and no answer came back. What was
+        // not known, and was previously claimed anyway: that the reasoning used up
+        // the output budget. A measured figure is put in its place, and the shape
+        // of the response is quoted so an answer hiding in an unread field shows
+        // up as a field rather than as a mystery.
+        const volume = reasoningTokens > 0 ? ` ~${reasoningTokens} tokens of it` : '';
+        const shape = fields ? ` The response carried: ${fields}.` : '';
+        return `the model returned reasoning${volume} and no answer at all.`
+            + (reasoningTokens > 0
+                ? ' Whether that filled the output budget or not is not knowable from here — compare it with the output limit in the log.'
+                : '')
+            + shape
+            + ' If the figure is far below the output limit, the answer arrived somewhere this extension does not read yet, and the log says what to look for.';
     }
     if (finishReason === 'length') {
         return 'the answer was cut off by the output limit before it held anything usable — raise "max output tokens"';

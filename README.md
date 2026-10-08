@@ -124,10 +124,12 @@ took, and the status line shows the elapsed seconds while a request is in flight
 so a slow run is visibly different from a stuck one. An answer that comes back
 empty is reported with its cause rather than as "empty response":
 
-- *spent the whole answer budget on reasoning* — the model thought its way
-  through the output limit. Raise **max output tokens**, or archive with a model
-  that does not think out loud.
-- *cut off by the output limit* — same cause, named from the provider's side.
+- *returned reasoning and no answer at all* — reasoning came back, the answer did
+  not. The measured size of the reasoning is quoted rather than assumed, together
+  with the fields the response actually carried: if the figure is far below the
+  output limit, the answer arrived somewhere the extension does not read yet, and
+  the log says which fields were there. Reasoning is collected from every frame
+  of a stream and from every field name providers use for it.- *cut off by the output limit* — same cause, named from the provider's side.
 - *answered with something that is not JSON* — a proxy or gateway answered
   instead of the model.
 - *the backend refused this material* — its filter stopped the request before
@@ -162,6 +164,13 @@ least like a model problem: stage 1 sends a fraction of what stage 2 does, so it
 succeeds and stage 2 fails identically with every model. The reason is the size
 of the request, and it appears in the log as `CAPPED (window)` or
 `CAPPED (share)`.
+
+The room the answer needs is taken off before the material is sized, so a request
+can never ask for more output than the window has left. With an 81000-token
+window and a 64000-token output limit, that leaves about 2900 tokens of material
+— which is the point: the request becomes one the backend can serve, instead of
+one it can only refuse. The status line and the log now print the output limit
+next to the budgets, so the arithmetic is visible.
 
 ## Notes
 
