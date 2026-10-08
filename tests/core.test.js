@@ -1167,6 +1167,33 @@ test('the room an answer needs is reserved before the material is sized', () => 
     assert.equal(fitStage2Budgets({ ...base, window: 0, outputTokens: 64000 }).usable, Infinity);
 });
 
+test('pressing Stop means stop, on both sides', async () => {
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+
+    // A run that was stopped must not go on to file an answer that was already on
+    // its way back: storing it is what made a stopped run look like it continued.
+    assert.match(src, /throwIfCancelled\(\);\s*\n\s*return result;/,
+        'a result arriving after Stop is discarded, not stored');
+
+    // And it must not be started again on its own: a stopped run leaves its
+    // material unrecorded, so the trigger threshold is still exceeded on the next
+    // message, which is what made Stop look ineffective.
+    assert.match(src, /autoTriggerSuppressed = true;/, 'Stop silences the automatic trigger');
+    assert.match(src, /if \(autoTriggerSuppressed\) return false;/);
+    assert.match(src, /autoTriggerSuppressed = false;\s*$/m, 'and a manual run lifts it');
+    assert.match(src, /if \(pending\.length < threshold\) autoTriggerSuppressed = false;/,
+        'material dealt with below the threshold re-arms it');
+    assert.match(src, /async function generateSummary\(\)[\s\S]*?autoTriggerSuppressed = false;/,
+        'generateSummary is a manual run, so it re-arms the trigger itself');
+
+    // The cancellation itself was already wired; it is checked so it stays wired.
+    assert.match(src, /controller\.abort\(new Error\(reason\)\)/);
+    assert.match(src, /runSignal\.addEventListener\('abort', onRunAbort/);
+
+    // And the user is told the one part that cannot be stopped from here.
+    assert.match(src, /may still finish on its side/);
+});
+
 test('an empty answer says which of the causes it was', () => {
     assert.match(describeEmptyAnswer({ reasoning: 'thinking...' }), /returned reasoning/);
     assert.match(describeEmptyAnswer({ finishReason: 'length' }), /cut off by the output limit/);

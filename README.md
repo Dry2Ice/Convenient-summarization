@@ -107,6 +107,7 @@ SillyTavern.
 | My requests: temperature / top p | One setting for both stages, 0.6 and 0.8 by default. Both stages restate material in a fixed format, so they sample the same way; top p 1 lets the model reach any token in the tail, which is where stray fragments come from. |
 | Message headers | Auto-detect reads Date/Time/Location in either `Key: value` or markdown-table form. Turn it on if your template carries them and detection still says no. |
 | Retry attempts / Delay between retries | How often a failed or empty request is retried, and how long the pause is. The status line counts the pause down. |
+| Stop | Ends the run at once: the request in flight is dropped, an answer that was already coming back is discarded rather than filed, and the automatic trigger stays off until a run is started by hand or the unrecorded count drops below the trigger. The one thing Stop cannot reach is the generation SillyTavern already asked the provider for — that request has no cancel channel, so the backend may still finish and bill it. |
 | View Story Bible / View Record | Both panels are hand-editable. A saved summary is what the next run revises, and it can be rolled back. |
 | Reset & Re-absorb | Discards the record, the story bible and the lorebook, releases every message, and starts recording from scratch. |
 | Rollback Summary | Restores the previous story bible and the record, and releases the messages recorded after it. |

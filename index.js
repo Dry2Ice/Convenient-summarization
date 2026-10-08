@@ -1104,6 +1104,11 @@ function beginRun(kind) {
 function cancelRun(reason = 'cancelled by user') {
     if (!activeRun || activeRun.cancelled) return false;
     activeRun.cancelled = true;
+    // The automatic trigger stays off until a run is asked for by hand. A stopped
+    // run leaves its material unrecorded by definition, so the threshold is still
+    // exceeded on the very next message, and without this the extension starts
+    // again on its own — which is precisely what pressing Stop is meant to end.
+    autoTriggerSuppressed = true;
     try {
         activeRun.controller.abort(new Error(reason));
     } catch (e) { /* already aborted */ }
@@ -1114,6 +1119,9 @@ function cancelRun(reason = 'cancelled by user') {
     log('Run cancelled:', activeRun.kind, '-', reason);
     return true;
 }
+
+/** Whether the automatic trigger may start a run on its own. */
+let autoTriggerSuppressed = false;
 
 function isCancelled() {
     return Boolean(activeRun?.cancelled);
@@ -1776,6 +1784,10 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
                 err.isRefusal = true;
                 throw err;
             }
+            // Stop pressed while the last request was already coming back: the
+            // answer is discarded rather than filed. Storing it is what made a
+            // stopped run look like it had carried on.
+            throwIfCancelled();
             return result;
         } catch (error) {
             if (error.isCancelled || isCancelled()) throw error;
@@ -2006,6 +2018,8 @@ async function generateSummary() {
         setStatus('already running');
         return;
     }
+    // Asked for by hand, so the automatic trigger may run again from here on.
+    autoTriggerSuppressed = false;
 
     const pending = getUnsummarizedMessages();
     if (pending.length < 1) {
@@ -2345,7 +2359,11 @@ async function generateSummary() {
         }
     } catch (error) {
         if (error.isCancelled || isCancelled()) {
-            setStatus(`stopped${absorbed ? ` — archive kept through message ${state.lastSummarizedIndex}` : ' — nothing archived'}`);
+            // Aborting our fetch stops this extension, not the generation SillyTavern
+            // already asked the provider for: that one has no cancel channel and may
+            // still be billed. Saying so beats a run that looks dead while it bills.
+            setStatus(`stopped${absorbed ? ` — archive kept through message ${state.lastSummarizedIndex}` : ' — nothing archived'}. ` +
+                'The request already accepted by the backend may still finish on its side.');
             log('Run stopped by user');
         } else {
             if (error.isContentFiltered || error.isRefusal) {
@@ -2515,11 +2533,16 @@ function shouldAutoSummarize() {
     const settings = getSettings();
     if (!settings.enabled || !settings.autoSummarize) return false;
     if (settings.isSummarizing) return false;
+    if (autoTriggerSuppressed) return false;
 
     // The trigger is the amount of unarchived material, not a free-running
     // counter: a cancelled or failed run cannot desynchronise it.
     const pending = getUnsummarizedMessages();
-    return pending.length >= Math.max(1, settings.summarizeEvery);
+    const threshold = Math.max(1, settings.summarizeEvery);
+    // Having run once and stopped, the material is still above the line by
+    // definition. Only a drop below it counts as having dealt with that material.
+    if (pending.length < threshold) autoTriggerSuppressed = false;
+    return pending.length >= threshold;
 }
 
 /**
