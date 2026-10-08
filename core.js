@@ -329,7 +329,7 @@ export function repairedText(msg) {
  */
 export function extractStreamText(raw) {
     const body = String(raw ?? '');
-    const empty = { text: '', reasoning: '', frames: 0, error: '', streamed: false };
+    const empty = { text: '', reasoning: '', frames: 0, error: '', streamed: false, sawDone: false, shape: '' };
     if (!body.trim()) return empty;
 
     if (!/^\s*(data:|event:|id:|retry:)/m.test(body)) {
@@ -345,6 +345,8 @@ export function extractStreamText(raw) {
             frames: 1,
             error: completionErrorText(data),
             streamed: false,
+            sawDone: true,
+            shape: responseShape(data),
         };
     }
 
@@ -352,14 +354,22 @@ export function extractStreamText(raw) {
     let reasoning = '';
     let frames = 0;
     let error = '';
+    let sawDone = false;
+    let lastShape = '';
 
     for (const line of body.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
 
         const payload = trimmed.slice('data:'.length).trim();
-        // The terminator frame carries no content.
-        if (!payload || payload === '[DONE]') continue;
+        if (!payload) continue;
+        // The terminator frame is the difference between a stream that ended
+        // cleanly and one the backend cut off, which is the whole diagnosis when
+        // reasoning arrived and no answer did.
+        if (payload === '[DONE]') {
+            sawDone = true;
+            continue;
+        }
 
         let data;
         try {
@@ -370,11 +380,12 @@ export function extractStreamText(raw) {
 
         frames++;
         if (!error) error = completionErrorText(data);
+        lastShape = responseShape(data);
         reasoning += reasoningText(data);
         text += extractCompletionText(data);
     }
 
-    return { text, reasoning, frames, error, streamed: true };
+    return { text, reasoning, frames, error, streamed: true, sawDone, shape: lastShape };
 }
 
 /**
@@ -606,7 +617,7 @@ export function responseShape(data) {
  * gets classified here so the status line can say whether to wait, shrink the
  * request, change endpoint, or stop trying.
  */
-export function describeEmptyAnswer({ error = '', reasoning = '', reasoningTokens = 0, fields = '', finishReason = '', parsed = true, contentType = '' } = {}) {
+export function describeEmptyAnswer({ error = '', reasoning = '', reasoningTokens = 0, fields = '', frames = 0, sawDone = null, finishReason = '', parsed = true, contentType = '' } = {}) {
     if (error) {
         const said = String(error).slice(0, 200);
         if (/content[_ -]?filter|safety|policy|blocked by|prohibited|nsfw|illegal/i.test(said)) {
@@ -630,8 +641,14 @@ export function describeEmptyAnswer({ error = '', reasoning = '', reasoningToken
         // of the response is quoted so an answer hiding in an unread field shows
         // up as a field rather than as a mystery.
         const volume = reasoningTokens > 0 ? ` ~${reasoningTokens} tokens of it` : '';
-        const shape = fields ? ` The response carried: ${fields}.` : '';
-        return `the model returned reasoning${volume} and no answer at all.`
+        const shape = fields ? ` The last frame carried: ${fields}.` : '';
+        const framesNote = frames > 0 ? ` The response arrived as ${frames} stream frame(s)` : '';
+        // A stream that never sent its terminator was cut off, and that is a
+        // different failure from a model that thought and then answered nothing.
+        const cut = sawDone === false
+            ? ' The stream ended without its terminator, so the backend stopped sending before the answer began.'
+            : '';
+        return `the model returned reasoning${volume} and no answer at all.${framesNote}${cut}`
             + (reasoningTokens > 0
                 ? ' Whether that filled the output budget or not is not knowable from here — compare it with the output limit in the log.'
                 : '')

@@ -1192,6 +1192,60 @@ test('pressing Stop means stop, on both sides', async () => {
 
     // And the user is told the one part that cannot be stopped from here.
     assert.match(src, /may still finish on its side/);
+
+    // A stop must not depend on one mutable global: an overlapping run, an early
+    // return or a chat switch clearing `activeRun` used to swallow it, and the
+    // symptom was a run that carried on to the next retry as though nothing had
+    // been pressed.
+    assert.match(src, /let stopRequested = false;/);
+    assert.match(src, /function isCancelled\(\) \{\s*return stopRequested \|\| Boolean\(activeRun\?\.cancelled\);/);
+    assert.match(src, /stopRequested = false;\s*\n\s*activeRun = \{/, 'a new run re-arms it');
+    assert.match(src, /stopRequested = true;\s*\n\s*if \(!activeRun \|\| activeRun\.cancelled\)/,
+        'the stop is recorded even when there is nothing to abort');
+    assert.match(src, /log\('Stop pressed'\)/, 'and it is traceable in the log');
+});
+
+test('an identical request is never paid for twice', async () => {
+    const src = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+    // The reasoning-only failure used to be retried unchanged: the same prompt, at
+    // full price, for the same result.
+    assert.match(src, /let shrinkDone = false;/);
+    assert.match(src, /error\.isEmptyResponse && typeof shrink === 'function' && !shrinkDone/);
+    assert.match(src, /one smaller attempt instead of the same one/);
+});
+
+test('a cut-off stream is told apart from a stream that ended cleanly', () => {
+    // "The response carried: nothing" was the report for every stream failure,
+    // because the shape of a stream body was never read — the body as a whole is
+    // not JSON, which says nothing about what came in it.
+    const cut = extractStreamText([
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
+    ].join('\n\n'));
+    assert.equal(cut.frames, 1);
+    assert.equal(cut.sawDone, false, 'no terminator arrived');
+    assert.match(cut.shape, /choice: /, 'the last frame is reported, not "nothing"');
+
+    const clean = extractStreamText([
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
+        'data: [DONE]',
+        '',
+    ].join('\n\n'));
+    assert.equal(clean.sawDone, true);
+
+    const cutOff = describeEmptyAnswer({
+        reasoning: 'x', reasoningTokens: 33027, frames: 41, sawDone: false,
+        fields: 'delta | choice: reasoning_content',
+    });
+    assert.match(cutOff, /~33027 tokens of it/);
+    assert.match(cutOff, /41 stream frame\(s\)/);
+    assert.match(cutOff, /ended without its terminator/, 'a cut stream is named as one');
+    assert.match(cutOff, /The last frame carried: delta/, 'never "nothing"');
+
+    const complete = describeEmptyAnswer({
+        reasoning: 'x', reasoningTokens: 10, frames: 3, sawDone: true, fields: 'delta',
+    });
+    assert.ok(!/ended without its terminator/.test(complete),
+        'a stream that ended cleanly is not described as cut off');
 });
 
 test('an empty answer says which of the causes it was', () => {

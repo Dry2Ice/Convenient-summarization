@@ -1096,13 +1096,31 @@ function budgetFor(configuredTokens) {
 
 let activeRun = null;
 
+/**
+ * Stop was asked for.
+ *
+ * Kept beside `activeRun` rather than inside it, because a single mutable global
+ * is exactly what makes a stop unreliable: anything that replaces or clears
+ * `activeRun` — an overlapping run, an early return, a chat switch — silently
+ * discards the request to stop. This one is only cleared when a new run begins.
+ */
+let stopRequested = false;
+
 function beginRun(kind) {
+    stopRequested = false;
     activeRun = { kind, cancelled: false, controller: new AbortController() };
+    log(`Run started: ${kind}`);
     return activeRun;
 }
 
 function cancelRun(reason = 'cancelled by user') {
-    if (!activeRun || activeRun.cancelled) return false;
+    // Set before anything else, so a stop still counts if there is no run object
+    // to abort — which is the case where a stop used to be swallowed entirely.
+    stopRequested = true;
+    if (!activeRun || activeRun.cancelled) {
+        log('Stop pressed, but no request is in flight to abort — recorded anyway:', reason);
+        return false;
+    }
     activeRun.cancelled = true;
     // The automatic trigger stays off until a run is asked for by hand. A stopped
     // run leaves its material unrecorded by definition, so the threshold is still
@@ -1111,7 +1129,10 @@ function cancelRun(reason = 'cancelled by user') {
     autoTriggerSuppressed = true;
     try {
         activeRun.controller.abort(new Error(reason));
-    } catch (e) { /* already aborted */ }
+        log(`Stop: aborted the ${activeRun.kind} run —`, reason);
+    } catch (e) {
+        log('Stop: the run was already over —', reason);
+    }
     // Unblocks the in-flight request made through SillyTavern's own generator.
     try {
         cancelStatusCheck(reason);
@@ -1124,7 +1145,7 @@ function cancelRun(reason = 'cancelled by user') {
 let autoTriggerSuppressed = false;
 
 function isCancelled() {
-    return Boolean(activeRun?.cancelled);
+    return stopRequested || Boolean(activeRun?.cancelled);
 }
 
 function throwIfCancelled() {
@@ -1337,6 +1358,7 @@ async function fetchWithTimeout(url, init, label) {
             throw err;
         }
         if (runSignal?.aborted || error?.name === 'AbortError') {
+            log(`${label}: request abandoned by Stop`);
             const err = new Error('cancelled');
             err.isCancelled = true;
             throw err;
@@ -1489,7 +1511,12 @@ async function directCompletion(prompt, label) {
         error: bodyError,
         reasoning: stream.reasoning || (parsed ? reasoningText(data) : ''),
         reasoningTokens: estimateTokens(stream.reasoning || (parsed ? reasoningText(data) : '')),
-        fields: parsed ? responseShape(data) : responseShape(null),
+        // A stream's shape comes from its last frame: reporting "nothing" because
+        // the body as a whole is not JSON is how a cut-off stream was passed off
+        // as a response that never arrived.
+        fields: stream.streamed ? stream.shape : (parsed ? responseShape(data) : ''),
+        frames: stream.frames,
+        sawDone: stream.streamed ? stream.sawDone : null,
         finishReason: finishReason || '',
         parsed,
         contentType: response.headers.get('content-type') || '',
@@ -1720,6 +1747,10 @@ function isContextLengthError(error) {
 
 async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, shrink = null } = {}) {
     const settings = getSettings();
+    // One flag for the whole request: whether the material has already been made
+    // smaller once. After that, repeating the identical prompt is refused rather
+    // than paid for.
+    let shrinkDone = false;
     const maxRetries = Math.max(0, settings.retryAttempts);
     const delayMs = Math.max(5, settings.retryDelaySeconds) * 1000;
     let promptTokens = estimateTokens(prompt);
@@ -1812,17 +1843,17 @@ async function runCompletion(prompt, label = 'request', { fallbackTokens = 0, sh
                 }
             }
 
-            // Reasoning with no answer behind it is worth one smaller try rather
-            // than the identical request: a shorter input leaves the model more
-            // room to finish, and repeating it unchanged asks the same question in
-            // the same breath.
-            if (error.isEmptyResponse && !isContextLengthError(error)
-                && typeof shrink === 'function' && !attempt) {
+            // Reasoning with no answer behind it is never worth sending the identical
+            // request again — that is the same money for the same result. The
+            // material shrinks instead, on every attempt, for as long as there is
+            // anything left to shrink.
+            if (error.isEmptyResponse && typeof shrink === 'function' && !shrinkDone) {
+                shrinkDone = true;
                 const smaller = shrink();
                 if (smaller) {
                     prompt = smaller;
                     promptTokens = estimateTokens(prompt);
-                    log(`${label}: no answer behind the reasoning — one smaller attempt before giving up`);
+                    log(`${label}: no answer behind the reasoning — one smaller attempt instead of the same one`);
                     continue;
                 }
             }
@@ -3656,10 +3687,10 @@ function bindUIEvents() {
     });
 
     document.getElementById('es_stop')?.addEventListener('click', () => {
-        if (cancelRun()) {
-            setStatus('stopping...');
-            updateUI();
-        }
+        log('Stop pressed');
+        const stopped = cancelRun();
+        setStatus(stopped ? 'stopping...' : 'stop recorded — nothing was in flight');
+        updateUI();
     });
 
     document.getElementById('es_use_guardrail')?.addEventListener('change', (e) => {
